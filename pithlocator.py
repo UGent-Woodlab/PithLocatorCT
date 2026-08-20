@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -291,6 +292,21 @@ def find_transverse(folder, stem):
 #          KOR-014-A,  KOR-014-B       tree KOR-014,  cores A and B
 #          KOR-014-A2, KOR-014-A3      tree KOR-014,  cores A2 and A3
 #
+#      A tree whose cores are NUMBERED can name the sections of one core with a
+#      trailing letter instead, which is the same three parts in the other
+#      order:
+#
+#          GHE-F015-1-A, GHE-F015-1-B  tree GHE-F015, core 1 in two sections
+#          GHE-F015-2                  tree GHE-F015, core 2
+#
+#      That shape -- letters, digits, letter -- is indistinguishable from
+#      KOR-014-A on its own, so like convention 2 below it is only accepted
+#      when the folder corroborates it: some other stem must split, by the
+#      plain separator rule, to the same tree with a purely NUMERIC core token
+#      (GHE-F015-2 above). That is what says the numbers in this tree are core
+#      ids rather than part of the tree name. Without it the name is left
+#      whole, so KOR-014-A and KOR-014-B stay cores A and B of KOR-014.
+#
 #   2. The common dendrochronology convention with NO separator at all: a site
 #      code and tree number (ending in a digit), then a one- or two-letter core
 #      id, then an optional number if that core was scanned in several pieces:
@@ -298,9 +314,10 @@ def find_transverse(folder, stem):
 #          ABC123A,  ABC123B           tree ABC123, cores A and B
 #          ABC123A1, ABC123A2          tree ABC123, core A in two sections
 #
-# A2 and A3 -- or A1 and A2 -- are not two different cores: they are SECTIONS of
-# one physical core that had to be scanned in pieces, sharing a tree and a core
-# letter. See section_group() below, which sums their ring width for case 3.
+# A2 and A3 -- or A1 and A2, or 1-A and 1-B -- are not two different cores: they
+# are SECTIONS of one physical core that had to be scanned in pieces, sharing a
+# tree and a core id. See section_group() below, which sums their ring width for
+# case 3.
 #
 # Convention 2 only applies when at least one OTHER stem in the same folder
 # confirms it, i.e. some other stem structurally splits to the same tree (see
@@ -319,6 +336,7 @@ def find_transverse(folder, stem):
 SEPARATOR_TOKEN_RE = re.compile(r"^[A-Za-z]{0,2}[0-9]{0,3}$")
 STRUCTURAL_RE = re.compile(r"^(?P<tree>.*[0-9])(?P<letter>[A-Za-z]{1,2})(?P<section>[0-9]{0,3})$")
 TOKEN_SPLIT_RE = re.compile(r"^(?P<letter>[A-Za-z]{0,2})(?P<section>[0-9]{0,3})$")
+NUMBERED_TOKEN_RE = re.compile(r"^(?P<core>[0-9]{1,3})(?P<section>[A-Za-z]{1,2})$")
 
 
 def parse_stem_separator(stem):
@@ -337,7 +355,7 @@ def parse_stem_structural(stem):
 
     token is the core letter plus its section number run together (e.g. "A2"),
     matching the shape a separator-rule token already has, so both feed the
-    same core_letter()/section_number() below.
+    same split_token() below.
     """
     m = STRUCTURAL_RE.match(stem)
     if not m:
@@ -345,26 +363,71 @@ def parse_stem_structural(stem):
     return m.group("tree"), m.group("letter") + m.group("section")
 
 
-def core_letter(token):
-    """Letter part of a core token: "A2" -> "A", "B" -> "B", "1" -> ""."""
+def parse_stem_numbered_section(stem):
+    """Try the numbered-core, lettered-section rule: GHE-F015-1-A is section A
+    of core 1 of tree GHE-F015. (tree, token) if the SHAPE fits, else None.
+
+    Shape alone is not enough -- KOR-014-A has the same one -- so the caller
+    only uses this when another stem in the folder corroborates it. See
+    resolve_stem_names, and the module comment above.
+
+    token is the core number with its section letter run together ("1A"), the
+    same one-string shape the other two rules produce, so split_token() below
+    can take all three.
+    """
+    sep = parse_stem_separator(stem)
+    if sep is None:
+        return None
+    head, tail = sep
+    if not tail.isalpha():
+        return None
+    inner = parse_stem_separator(head)
+    if inner is None:
+        return None
+    tree, number = inner
+    if not number.isdigit():
+        return None
+    return tree, number + tail
+
+
+def split_token(token):
+    """(core id, section number) for a core token, in either shape:
+
+        "A"  -> ("A", 0)    core A, scanned whole
+        "A2" -> ("A", 2)    core A, section 2
+        "1"  -> ("1", 0)    core 1, scanned whole
+        "1A" -> ("1", 1)    core 1, section A     (GHE-F015-1-A)
+
+    A folder either letters its cores and numbers their sections or numbers its
+    cores and letters their sections. Either way the first part is what the
+    sections of one physical core share, and the second orders them -- see
+    section_group(), which sums their ring width for case 3.
+
+    So the number in a purely numeric token is a core id, not a section:
+    GHE-Q003-1 and GHE-Q003-2 are two different cores, and each is its own
+    group of one.
+    """
     m = TOKEN_SPLIT_RE.match(token or "")
-    return m.group("letter") if m else ""
+    if m:
+        letter, section = m.group("letter"), m.group("section")
+        return (letter or section), (int(section) if letter and section else 0)
+    m = NUMBERED_TOKEN_RE.match(token or "")
+    if m:
+        n = 0
+        for ch in m.group("section").upper():
+            n = n * 26 + (ord(ch) - ord("A") + 1)
+        return m.group("core"), n
+    return "", 0
+
+
+def core_id(token):
+    """What the sections of one physical core share: "A2" -> "A", "1A" -> "1"."""
+    return split_token(token)[0]
 
 
 def section_number(token):
-    """Section number within a core: "A2" -> 2, "A" -> 0, "1" -> 0.
-
-    A core broken up during scanning is split into sections that share a tree
-    and a core letter, e.g. A1 and A2 are two pieces of core A -- see
-    section_group() below, which groups them for summing case 3's ring width.
-    Zero for a purely numeric token, because there the number identifies the
-    core itself: GHE-Q003-1 and GHE-Q003-2 are two different cores, not two
-    sections of one, so "2" is not a section number.
-    """
-    m = TOKEN_SPLIT_RE.match(token or "")
-    if not m or not m.group("letter") or not m.group("section"):
-        return 0
-    return int(m.group("section"))
+    """Which section of its core this is, 0 when the core is in one piece."""
+    return split_token(token)[1]
 
 
 def scan_folder(folder):
@@ -447,10 +510,24 @@ def resolve_stem_names(stems):
             struct_trees.setdefault(tree, []).append(stem)
     confirmed = any(len(v) >= 2 for v in struct_trees.values())
 
+    # Trees whose cores the separator rule numbers: GHE-F015-2 makes GHE-F015
+    # one of them. Only such a stem corroborates the numbered-core split, and
+    # only for its own tree -- two candidates must not confirm each other, or
+    # KOR-014-A and KOR-014-B would "confirm" a tree KOR.
+    numbered_trees = set(tree for kind, tree, token in tentative.values()
+                         if kind == "sep" and token.isdigit())
+
     resolved = {}
     for stem, (kind, tree, token) in tentative.items():
-        resolved[stem] = (stem, "") if (kind == "struct" and not confirmed) \
-            else (tree, token)
+        if kind == "struct" and not confirmed:
+            resolved[stem] = (stem, "")
+            continue
+        if kind == "sep":
+            peel = parse_stem_numbered_section(stem)
+            if peel is not None and peel[0] in numbered_trees:
+                resolved[stem] = peel
+                continue
+        resolved[stem] = (tree, token)
     return resolved
 
 
@@ -706,18 +783,18 @@ class App(object):
         return [s["name"] for s in self.species]
 
     def section_group(self, stem):
-        """Every core sharing this one's tree and core letter, sorted by
-        section number -- the pieces of one physical core that was scanned in
-        parts. [stem] alone when its token has no letter, or has no siblings.
+        """Every core sharing this one's tree and core id, sorted by section
+        number -- the pieces of one physical core that was scanned in parts.
+        [stem] alone when its token names no core, or when it has no siblings.
         """
         c = self.cores.get(stem)
         if c is None:
             return [stem]
-        letter = core_letter(c["core_token"])
-        if not letter:
+        cid = core_id(c["core_token"])
+        if not cid:
             return [stem]
         group = [s for s, sc in self.cores.items()
-                 if sc["tree"] == c["tree"] and core_letter(sc["core_token"]) == letter]
+                 if sc["tree"] == c["tree"] and core_id(sc["core_token"]) == cid]
         if len(group) <= 1:
             return [stem]
         return sorted(group, key=lambda s: section_number(self.cores[s]["core_token"]))
@@ -817,6 +894,71 @@ class App(object):
 # --------------------------------------------------------------------------
 # HTTP
 
+# --------------------------------------------------------------------------
+# choosing another folder while the tool is running
+#
+# The dialog has to open on the machine running the server, which is the same
+# machine as the browser -- this is a localhost tool -- so a native folder
+# dialog is the honest picker. Tk is run in a SHORT-LIVED SUBPROCESS rather
+# than in this process: tkinter insists on the main thread, and the request
+# arrives on one of the ThreadingHTTPServer's worker threads, so an in-process
+# dialog would either crash or need a main-thread queue for no gain. A
+# subprocess also cannot take the server down with it, and leaves no Tk state
+# behind between pickings.
+#
+# Exit code 3 means "no usable Tk here" (a Python built without tkinter, a
+# headless Linux box); empty output means the dialog was cancelled.
+
+_PICKER = r"""
+import sys
+try:
+    import tkinter
+    from tkinter import filedialog
+except Exception:
+    sys.exit(3)
+try:
+    root = tkinter.Tk()
+except Exception:
+    sys.exit(3)
+root.withdraw()
+try:
+    root.attributes("-topmost", True)
+except Exception:
+    pass
+kw = {"title": "Choose a folder of RingIndicator output", "mustexist": True}
+if len(sys.argv) > 1 and sys.argv[1]:
+    kw["initialdir"] = sys.argv[1]
+try:
+    path = filedialog.askdirectory(**kw)
+finally:
+    try:
+        root.destroy()
+    except Exception:
+        pass
+sys.stdout.write(path or "")
+"""
+
+PICK_TIMEOUT_S = 600  # the dialog waits for a person; only a hang is an error
+
+
+def pick_folder_dialog(initialdir=None):
+    """Open the OS folder dialog. Path chosen, "" if cancelled, None if there
+    is no usable dialog on this machine (the caller then asks for a typed
+    path)."""
+    cmd = [sys.executable, "-c", _PICKER, initialdir or ""]
+    kw = {}
+    if os.name == "nt":
+        kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=PICK_TIMEOUT_S, **kw)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    return p.stdout.decode("utf-8", "replace").strip()
+
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
@@ -825,6 +967,10 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
 class Handler(BaseHTTPRequestHandler):
     server_version = "PithLocatorCT/" + TOOL_VERSION
     app = None
+    # The app is one class attribute, so switching folders is a single atomic
+    # rebind; the lock only keeps two switches from building an App each.
+    switch_lock = threading.Lock()
+    pick_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         if "--verbose" in sys.argv:
@@ -918,6 +1064,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(400, "no tree given")
                 self.app.store.delete(tree)
                 return self._json({"ok": True})
+            if u.path == "/api/folder":
+                return self._switch_folder(payload.get("path"))
+            if u.path == "/api/folder/pick":
+                return self._pick_folder()
             if u.path == "/api/species":
                 rows = payload.get("species") or []
                 clean = []
@@ -940,6 +1090,40 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(500, "%s: %s" % (type(exc).__name__, exc))
 
     # -- endpoints
+
+    def _pick_folder(self):
+        """Ask the machine running the tool for a folder, with its own dialog."""
+        if not self.pick_lock.acquire(False):
+            return self._json({"busy": True})  # a dialog is already open
+        try:
+            path = pick_folder_dialog(self.app.folder)
+        finally:
+            self.pick_lock.release()
+        if path is None:
+            return self._json({"unavailable": True})
+        if not path:
+            return self._json({"cancelled": True})
+        return self._json({"path": os.path.abspath(path)})
+
+    def _switch_folder(self, path):
+        """Serve a different folder from now on. Everything folder-derived --
+        the scan, the preview cache, the species table, the results file --
+        lives on the App, so a switch is one new App and one rebind. The old
+        app stays bound if building the new one fails."""
+        path = str(path or "").strip()
+        if not path:
+            return self._err(400, "no folder given")
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isdir(path):
+            return self._err(400, "Not a folder: %s" % path)
+        with Handler.switch_lock:
+            if os.path.normcase(path) == os.path.normcase(self.app.folder):
+                self.app.rescan()
+            else:
+                app = App(path)
+                Handler.app = app
+                print("  folder   %s  (%d trees)" % (path, len(app.trees)))
+        return self._json(self.app.session())
 
     def _image(self, q):
         tree = (q.get("tree") or [""])[0]

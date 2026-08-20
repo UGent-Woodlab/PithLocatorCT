@@ -79,16 +79,42 @@ These are the things that look wrong and are not, or that break silently.
    structural rule becomes its own tree: showing a core alone is recoverable,
    filing it under the wrong tree is not.
 
+   `parse_stem_numbered_section` needs the same kind of corroboration, and the
+   reason is sharper: `GHE-F015-1-A` (section A of core 1) and `KOR-014-A`
+   (core A) are the *same shape*. The peel is accepted only when another stem
+   splits, by the plain separator rule, to the same peeled tree with a purely
+   numeric token -- `GHE-F015-2`. Two peel candidates must never confirm each
+   other, or `KOR-014-A` and `KOR-014-B` would invent a tree `KOR`; this is
+   why the check is per tree and not a folder-wide flag like `confirmed`.
+
 8. **Sections are pieces of one broken core, not separate cores or repeat
-   scans.** `ABC123A1`/`ABC123A2` (or `KOR-014-A2`/`KOR-014-A3`) share a tree
-   and a core letter (`core_letter`), differing only in `section_number`.
+   scans.** `ABC123A1`/`ABC123A2`, `KOR-014-A2`/`KOR-014-A3` and
+   `GHE-F015-1-A`/`GHE-F015-1-B` share a tree and a core id (`core_id`),
+   differing only in `section_number`. Both come out of `split_token`, which
+   takes either token shape -- letter then section number, or core number then
+   section letter -- so a numbered core with lettered sections needs no
+   separate grouping path. It returns a core id for a purely numeric token too
+   (`"1"` -> `("1", 0)`), which looks like it would group `GHE-Q003-1` with
+   `-2`: it does not, because those are different ids and `section_group`
+   returns `[stem]` for a group of one.
    `App.section_group()` finds all of them; case 3 sums their `accum_rw_mm` by
    default (`_save_result`'s `sum_sections`, default `True`) because measuring
    only the opened section understates ΣRW and silently inflates the computed
    distance to the pith. Do not "simplify" this back to a single file's value
    -- that is the bug this was written to fix.
 
-9. **The species CSV is versioned.** `pith_species_shrinkage.csv` in a data
+9. **Switching folders builds a new `App` and rebinds `Handler.app`.**
+   Everything folder-derived — the scan, `PreviewCache`, `ResultStore`, the
+   species table — is constructed in `App.__init__`, so `POST /api/folder` is
+   one `App(path)` and one attribute assignment; the old app stays bound if the
+   new one raises, and one `.xlsx` per folder still holds. The Tk folder dialog
+   (`pick_folder_dialog`) runs in a **subprocess**: tkinter insists on the main
+   thread and the request arrives on a `ThreadingHTTPServer` worker. Exit code 3
+   from that subprocess means "no usable dialog here", which the client turns
+   into a typed-path prompt — do not conflate it with a cancelled dialog, which
+   is a clean exit with empty output.
+
+10. **The species CSV is versioned.** `pith_species_shrinkage.csv` in a data
    folder overrides the shipped table, so it carries a version marker; a file
    from an older build is moved to `.old.csv` rather than read or deleted. Bump
    `SPECIES_TABLE_VERSION` whenever the shipped values change, or users keep
@@ -147,6 +173,17 @@ Worth re-checking after any change to grouping or selection:
 | `ABC123A` + `ABC124A` in the same folder | two trees, `ABC123`/`ABC124` -- never merged |
 | `XYZ200A1` + `XYZ200A2` | one tree, one core in two sections; case 3's ΣRW is their sum |
 | `SHP856A2N1` alone | its own tree, not filed under `SHP856A2N` |
+| `GHE-F015-1-A` + `GHE-F015-1-B` + `GHE-F015-2` | one tree `GHE-F015`; `-1-A`/`-1-B` are sections of core 1 and their ΣRW sums; `-2` is its own core |
+| `GHE-F015-1-A` + `GHE-F015-1-B`, no `-2` | tree `GHE-F015-1`, cores `A`/`B` -- unconfirmed, so no peel |
+| `KOR-014-A` + `KOR-014-B` | tree `KOR-014` -- same shape, but nothing confirms a tree `KOR` |
+
+The folder switch is testable headless apart from the dialog itself: drive
+`POST /api/folder` (and `openFolder(path)` in the page) between two folders and
+assert the tree list, `#folderPath`, progress and per-folder `pith_offsets.*`.
+`POST /api/folder/pick` answers `{"unavailable": true}` in the sandbox, since
+there is no tkinter for the running interpreter; the dialog itself was checked
+by running `_PICKER` under `xvfb-run` with a Python that has tkinter and seeing
+it stay open.
 
 `run.bat` cannot be executed in the sandbox. Its winget branch is the one path
 that has never run on real Windows; review it by reading, and be careful with

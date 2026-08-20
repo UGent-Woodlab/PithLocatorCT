@@ -14,7 +14,7 @@
     <span class="mark"></span>
     <div>
       <h1>PithLocatorCT</h1>
-      <p id="folderPath" class="folder">…</p>
+      <button id="folderPath" class="folder" type="button">…</button>
     </div>
   </div>
 
@@ -24,6 +24,7 @@
   </div>
 
   <div class="topbar-actions">
+    <button id="btnFolder" class="ghost-btn" title="Open another folder of cores">Open folder…</button>
     <button id="btnSpecies" class="ghost-btn">Species table</button>
     <a id="btnExport" class="ghost-btn" href="/api/xlsx">Download .xlsx</a>
     <button id="btnManual" class="ghost-btn accent">Manual</button>
@@ -111,7 +112,7 @@
           <em>pith missed by the core</em>
         </button>
         <button class="tab" data-method="indicated">
-          <b>2</b> Pith on the core
+          <b>2</b> Pith present and already indicated
           <em>offset is 0 mm</em>
         </button>
         <button class="tab" data-method="geometric">
@@ -224,7 +225,13 @@
         <code>ABC123<b>A1</b></code>/<code>ABC123<b>A2</b></code>,
         <code>KOR-014-<b>A2</b></code>/<code>KOR-014-<b>A3</b></code> — marks
         <b>sections</b> of one physical core scanned in pieces, not separate
-        cores; case 3 sums their ring width. For each tree the core that reaches
+        cores; case 3 sums their ring width. A tree whose cores are
+        <b>numbered</b> can letter its sections instead:
+        <code>GHE-F015-<b>1-A</b></code> and <code>GHE-F015-<b>1-B</b></code> are
+        two sections of core 1 of <code>GHE-F015</code>, beside its core
+        <code>GHE-F015-<b>2</b></code> — accepted only when such a numbered core
+        is in the folder to confirm it, so <code>KOR-014-A</code> is never carved
+        up. For each tree the core that reaches
         <b>furthest back in time</b> (lowest indicated year) is opened; on an
         equal oldest year the higher section number wins. Every core of the tree
         is listed beside the tree name, so one click switches to another. It
@@ -232,6 +239,14 @@
         preview <code>&lt;core&gt;_Tv.tif</code>, windowed to 200–1200&nbsp;kg/m³, with the
         indication lines from <code>&lt;core&gt;_ring_and_fibre.txt</code> drawn on top.
         Your estimate is written to <code>pith_offsets.xlsx</code> in that same folder.
+      </p>
+      <p>
+        To move on to another folder there is no need to restart:
+        <b>Open folder…</b> in the top bar, or a click on the folder path beside
+        the title, opens your system's folder dialog and switches to what you
+        pick. Each folder keeps its own <code>pith_offsets.xlsx</code>, so what
+        you have already measured stays where you measured it, and reopening a
+        folder resumes it where you left off.
       </p>
 
       <h3>The three cases</h3>
@@ -245,8 +260,8 @@
           RingIndicator measures its tilt-corrected ring widths.
         </li>
         <li>
-          <b>Pith on the core.</b> The pith is visible and already indicated, so the
-          offset is 0&nbsp;mm.
+          <b>Pith present and already indicated.</b> The pith is visible on the core
+          and the innermost indication sits on it, so the offset is 0&nbsp;mm.
         </li>
         <li>
           <b>Diameter &amp; bark.</b> The core is too short, or the centre has rotted,

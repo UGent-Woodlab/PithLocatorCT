@@ -44,6 +44,12 @@ The browser opens on `http://127.0.0.1:8765/`. Add `--port 9000` to move it,
 `--no-browser` to stop it opening a tab. Stop it with Ctrl-C; results are already
 on disk. Needs Python 3.8 or newer.
 
+To work through a second folder there is no need to restart: **Open folder…** in
+the top bar (or a click on the folder path beside the title) opens your system's
+folder dialog and switches to what you pick. Each folder keeps its own
+`pith_offsets.xlsx`/`.json`, so results already measured stay where they were
+measured, and reopening a folder resumes it where you left off.
+
 ## What it expects in the folder
 
 Per core, named after the core stem:
@@ -85,11 +91,28 @@ states outright where the tree name ends:
 | `KOR-014-A2`, `KOR-014-A3` | `KOR-014` | core `A`, sections `2` and `3` |
 | `GHE-Q003-1`, `GHE-Q003-2` | `GHE-Q003` | `1`, `2` |
 
+A tree whose cores are **numbered** can name the sections of one core with a
+trailing letter instead — the same three parts in the other order:
+
+| files | tree | cores |
+|---|---|---|
+| `GHE-F015-1-A`, `GHE-F015-1-B`, `GHE-F015-2` | `GHE-F015` | core `1` in sections `A` and `B`, core `2` |
+
+That shape — letters, digits, letter — is indistinguishable from `KOR-014-A` on
+its own, so like the no-separator convention it is only accepted when the folder
+confirms it: some other name must split, by the plain separator rule, to the
+same tree with a purely **numeric** core token (`GHE-F015-2` above). That is
+what says the numbers in this tree are core ids rather than part of the tree
+name. Without it the name is left whole, so `KOR-014-A` and `KOR-014-B` stay
+cores `A` and `B` of `KOR-014`, and `GHE-F015-1-A` on its own stays a core of a
+tree `GHE-F015-1`.
+
 A name matching neither convention is its own tree, which is the safe direction
 to fail: the core shows up on its own rather than being filed under a tree it
 does not belong to.
 
-**Sections** (`ABC123A1`/`ABC123A2`, or `KOR-014-A2`/`KOR-014-A3`) are pieces of
+**Sections** (`ABC123A1`/`ABC123A2`, `KOR-014-A2`/`KOR-014-A3`, or
+`GHE-F015-1-A`/`GHE-F015-1-B`) are pieces of
 one physical core that had to be scanned in parts, not separate cores. Case 3
 sums their ring width automatically — see below.
 
@@ -110,7 +133,8 @@ switching to another is one click and nothing is ever hidden.
    perpendicular distance from that point to the innermost indicated ring, which
    is the direction in which RingIndicator measures its tilt-corrected ring
    widths. The straight centre-to-centre distance is recorded alongside it.
-2. **Pith on the core** — the pith is visible and indicated, so the offset is 0.
+2. **Pith present and already indicated** — the pith is visible on the core and the
+   innermost indication sits on it, so the offset is 0.
 3. **Diameter & bark** — for cores that are too short, or whose centre has
    rotted, where no curvature is usable. The offset is
 

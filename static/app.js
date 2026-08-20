@@ -49,8 +49,14 @@ async function init() {
   await loadSession(false);
   wireUI();
   resizeCanvas();
-  if (S.trees.length) await goto(S.session.start_index || 0);
-  else showStageMessage('No cores found in this folder. The tool looks for ' +
+  await startSession();
+}
+
+/** Open the folder's starting core, or say why there is nothing to open.
+ *  Shared by the initial load and by switching to another folder. */
+async function startSession() {
+  if (S.trees.length) return goto(S.session.start_index || 0);
+  showStageMessage('No cores found in this folder. The tool looks for ' +
     'RingIndicator sidecar files named <b>&lt;core&gt;_ring_and_fibre.txt</b>.');
 }
 
@@ -63,10 +69,81 @@ async function loadSession(rescan) {
   const parts = f.split(/[\\/]/).filter(Boolean);
   $('folderPath').textContent = parts.length > 2
     ? '…/' + parts.slice(-2).join('/') : f;
-  $('folderPath').title = f;
+  $('folderPath').title = f + '\nclick to open another folder';
   buildSpeciesSelect();
   renderTreeList();
   renderProgress();
+}
+
+/* ----------------------------------------------------------- the folder */
+
+/** Ask the server to open its own folder dialog -- it runs on this machine,
+ *  since this is a localhost tool -- and switch to what comes back. */
+async function changeFolder() {
+  let path;
+  try {
+    const r = await fetch('/api/folder/pick', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const d = await r.json();
+    if (d.busy) return toast('A folder dialog is already open.', 'warn');
+    if (d.cancelled) return;
+    path = d.unavailable ? askForPath('No folder dialog is available here.\n')
+                         : d.path;
+  } catch (e) {
+    path = askForPath('The folder dialog could not be opened (' + e.message + ').\n');
+  }
+  if (path) await openFolder(path);
+}
+
+function askForPath(why) {
+  return prompt(why + 'Paste the full path of the folder to open:',
+                (S.session && S.session.folder) || '');
+}
+
+/** Serve a different folder from now on. One .xlsx per folder is unchanged:
+ *  the server rebuilds everything folder-derived, and results already saved
+ *  stay in the folder they were measured in. */
+async function openFolder(path) {
+  let d = {};
+  try {
+    const r = await fetch('/api/folder', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: path }),
+    });
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'the server refused that folder');
+  } catch (e) {
+    return toast('Not opened: ' + e.message, 'err', 7000);
+  }
+  clearFolderState();
+  await loadSession(false);
+  await startSession();
+  toast(S.trees.length
+    ? 'Opened ' + $('folderPath').textContent + ' — ' + S.trees.length + ' trees'
+    : 'Opened, but no cores were found there', S.trees.length ? '' : 'warn', 4500);
+}
+
+/** Everything on the client that belonged to the previous folder. The sticky
+ *  species is one of them: it saves re-picking within a folder, but the next
+ *  folder is as likely to be another species as not. */
+function clearFolderState() {
+  S.index = 0;
+  S.core = null; S.pith = null; S.hover = null; S.bitmap = null;
+  S.imgW = 0; S.imgH = 0; S.step = 1; S.mmPerWorld = null;
+  S.lastSpecies = null;
+  S.onlyOpenedSection = false;
+  $('onlyOpenedSection').checked = false;
+  $('treeName').textContent = '—';
+  $('coreChips').innerHTML = '';
+  $('coreFacts').innerHTML = '';
+  $('notes').value = '';
+  $('bark').value = ''; $('diameter').value = ''; $('outerGap').value = '0';
+  $('offscreenHint').classList.add('hidden');
+  hideStageMessage();
+  setDiamMode('diameter');
+  setMethod('concentric');
+  draw();
 }
 
 /* ------------------------------------------------------------------ list */
@@ -320,8 +397,12 @@ const s2wy = (y) => (y - S.view.ty) / S.view.k;
 function resetView() {
   if (!S.bitmap) return;
   const inner = S.core.rings.length ? ringLine(0).xc : 0;
-  const span = Math.max(S.imgH * 4.5, 400);
-  const k = Math.min(S.cssW / span, S.cssH / (S.imgH * 1.3));
+  // Both spans are twice what a snug fit would need: a core is far longer than
+  // it is high, and the wood around the innermost rings is the context you
+  // judge the curvature against. Doubling both keeps the halved zoom whichever
+  // of the two the stage's aspect ratio makes the binding constraint.
+  const span = Math.max(S.imgH * 9, 800);
+  const k = Math.min(S.cssW / span, S.cssH / (S.imgH * 2.6));
   S.view.k = clamp(k, 0.005, 60);
   centreOnX(inner, 0.68);
   S.view.ty = S.cssH / 2 - (S.imgH / 2) * S.view.k;
@@ -969,6 +1050,8 @@ function wireUI() {
     await goto(i >= 0 ? i : 0);
     toast('Folder re-read: ' + S.trees.length + ' trees');
   };
+  $('folderPath').onclick = changeFolder;
+  $('btnFolder').onclick = changeFolder;
   $('btnManual').onclick = () => openModal('manualModal');
   $('btnSpecies').onclick = () => { renderSpeciesTable(); openModal('speciesModal'); };
   $('btnAddSpecies').onclick = () => {
