@@ -1,2 +1,153 @@
 # PithLocatorCT
-measure the distance to the pith on CT cores
+
+Measure the distance to the pith on CT cores.
+
+A small local web tool for estimating the distance from the innermost indicated
+ring of an increment core to the pith, for cores measured with
+[RingIndicator](https://github.com/UGent-Woodlab/RingIndicator).
+
+It reads a folder of RingIndicator output, groups the cores into trees, opens the
+core of each tree that reaches furthest back in time, draws the indication lines
+over the transverse preview, and writes your estimates to `pith_offsets.xlsx` in
+that same folder. Nothing leaves the machine: the server binds to `127.0.0.1`
+only.
+
+![the concentric-circle case](docs/screenshot.png)
+
+## Running it
+
+**Windows** — drag the folder with your cores onto `run.bat`, or double-click
+`run.bat` and paste the path when it asks.
+
+`run.bat` looks for Python in every sensible place before it does anything else:
+a `python\` folder next to the script, the `py` launcher, `python` / `python3` on
+PATH, the per-user and all-users install directories, the registry, and the Store
+install. Each candidate is checked by *running* it, which is what rejects the
+`WindowsApps\python.exe` stub that sits on PATH on many machines and only opens
+the Microsoft Store. If nothing works it offers to install Python for you with
+`winget` and then finds it without needing a restart.
+
+**macOS / Linux**
+
+```sh
+./run.sh /path/to/cores
+```
+
+**Any platform, manually**
+
+```sh
+pip install -r requirements.txt        # numpy, tifffile, pillow, openpyxl
+python pithlocator.py /path/to/cores
+```
+
+The browser opens on `http://127.0.0.1:8765/`. Add `--port 9000` to move it,
+`--no-browser` to stop it opening a tab. Stop it with Ctrl-C; results are already
+on disk. Needs Python 3.8 or newer.
+
+## What it expects in the folder
+
+Per core, named after the core stem:
+
+| file | used for |
+|---|---|
+| `<core>_ring_and_fibre.txt` | ring boundary positions and tilt — **required**, this is what makes a core visible to the tool |
+| `<core>_ringwidth.txt` | calendar years, pixel size, accumulated ring width |
+| `<core>_Tv.tif` | the transverse preview, windowed to 200–1200 kg/m³ |
+
+## How cores are grouped into trees
+
+The **last part of the name is the core**; everything before it is the tree.
+
+| files | tree | cores |
+|---|---|---|
+| `KOR-014-A`, `KOR-014-B` | `KOR-014` | `A`, `B` |
+| `KOR-014-A2`, `KOR-014-A3` | `KOR-014` | `A2`, `A3` |
+| `GHE-Q003-1`, `GHE-Q003-2` | `GHE-Q003` | `1`, `2` |
+| `SHP856A2N1` | `SHP856A2N1` | — |
+
+A trailing token counts as a core id when it is up to two letters and up to three
+digits (`A`, `B2`, `A3`, `1`, `12`). Anything else — and any name with no `-` or
+`_` at all — is left as its own tree, which is the safe direction to fail: the
+core shows up on its own rather than being filed under a tree it does not belong
+to.
+
+The core opened for each tree is the one with the **lowest indicated year**, from
+`_ringwidth.txt`. On an equal oldest year the higher core number wins, so `A3` is
+opened rather than `A2` — a repeat scan of the same core is the later one. It is
+only a tie-break: a core that genuinely reaches further back is opened whatever
+its number. Cores with no preview image lose to cores that have one.
+
+Every core of the tree is listed beside the tree name with its oldest year, so
+switching to another is one click and nothing is ever hidden.
+
+## The three cases
+
+1. **Concentric circles** (the default). The core missed the pith. Circles are
+   drawn around the cursor through each of the innermost indicated rings; line
+   the centre up with the ring curvature and click. The saved offset is the
+   perpendicular distance from that point to the innermost indicated ring, which
+   is the direction in which RingIndicator measures its tilt-corrected ring
+   widths. The straight centre-to-centre distance is recorded alongside it.
+2. **Pith on the core** — the pith is visible and indicated, so the offset is 0.
+3. **Diameter & bark** — for cores that are too short, or whose centre has
+   rotted, where no curvature is usable. The offset is
+
+   ```
+   D/2 − bark − ΣRW / (1 − Sr)
+   ```
+
+   where `ΣRW` is the accumulated indicated ring width of the core and `Sr` the
+   total green → oven-dry radial shrinkage of the species. The cores are oven
+   dried, so this expands the measured widths back to their green size. The ⌀/C
+   button switches the diameter field to circumference.
+
+## Species and shrinkage
+
+Case 3 needs a species, for its radial shrinkage. Pick it once and it carries to
+the next tree, so a folder of one species is chosen once. The bark and diameter
+fields are always cleared between trees, because a carried-over diameter would be
+both wrong and invisible.
+
+The shipped `Sr` values are the CIRAD Tropix figures for temperate species:
+
+| species | Sr | species | Sr |
+|---|---|---|---|
+| Abies alba | 0.040 | Pinus radiata | 0.042 |
+| Acer pseudoplatanus | 0.045 | Pinus sylvestris | 0.052 |
+| Castanea sativa | 0.042 | Pinus uncinata | 0.041 |
+| Cedrus atlantica | 0.041 | Populus p.p. | 0.048 |
+| Fagus sylvatica | 0.057 | Pseudotsuga menziesii | 0.047 |
+| Fraxinus excelsior | 0.057 | Quercus robur/petraea | 0.045 |
+| Larix decidua | 0.042 | Thuja plicata | 0.022 |
+| Picea abies | 0.039 | Tilia x europaea | 0.050 |
+| Pinus pinaster | 0.045 | | |
+
+Every value is editable — **Species table** in the top bar — and edits are kept in
+`pith_species_shrinkage.csv` next to the data. Whichever value a measurement used
+is written into its row together with its source, so a result always says where
+its number came from. A `Source` containing the word *verify* is flagged with a
+marker in the dropdown, which is a convenient way to mark a value you are unsure
+of.
+
+## Output
+
+`pith_offsets.xlsx` — one row per tree. `Distance_to_Pith_mm` is the column to
+merge into your metadata. The remaining columns record how the number was
+reached: method, the measured perpendicular and centre-to-centre distances, the
+diameter/bark/Sr inputs, accumulated ring width oven-dry and green, pixel size,
+the clicked position, and a `Flag` column for results worth a second look.
+
+`pith_offsets.json` holds the same rows and is what the tool reads on startup to
+work out where you left off: restart on the same folder and it reopens at the
+first tree with no result yet, ticks the finished ones, and restores a saved pith
+click when you revisit one. The `.xlsx` is rewritten from the JSON after every
+save, so it is safe to keep the file closed and let the tool own it — if Excel
+has it open and the write fails, the tool says so and the JSON is still current.
+
+## Notes
+
+- `.pith_cache/` next to the data holds the rendered previews. Delete it any
+  time; it is rebuilt on demand.
+- Ring geometry follows `ri.view.RingGeometry` in RingIndicator: a boundary at
+  `zpos` with tilt `theta` is the line through `(zpos, (H-1)/2)` with direction
+  `(sin θ, cos θ)`. Distances are measured along its normal.

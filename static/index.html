@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PithLocatorCT</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <button id="btnSidebar" class="icon-btn" title="Show or hide the core list">☰</button>
+  <div class="brand">
+    <span class="mark"></span>
+    <div>
+      <h1>PithLocatorCT</h1>
+      <p id="folderPath" class="folder">…</p>
+    </div>
+  </div>
+
+  <div class="progress-wrap">
+    <div class="progress-bar"><span id="progressFill"></span></div>
+    <span id="progressText" class="progress-text">0 / 0</span>
+  </div>
+
+  <div class="topbar-actions">
+    <button id="btnSpecies" class="ghost-btn">Species table</button>
+    <a id="btnExport" class="ghost-btn" href="/api/xlsx">Download .xlsx</a>
+    <button id="btnManual" class="ghost-btn accent">Manual</button>
+  </div>
+</header>
+
+<div class="layout">
+
+  <aside id="sidebar" class="sidebar">
+    <div class="side-head">
+      <input id="treeFilter" type="search" placeholder="Filter trees…" autocomplete="off">
+      <button id="btnRescan" class="ghost-btn small" title="Re-read the folder">Rescan</button>
+    </div>
+    <ul id="treeList" class="tree-list"></ul>
+    <div class="side-foot">
+      <span id="sideSummary"></span>
+    </div>
+  </aside>
+
+  <main class="main">
+
+    <div class="corebar">
+      <div class="corebar-left">
+        <span id="treeName" class="tree-name">—</span>
+        <span id="coreChips" class="core-chips"></span>
+      </div>
+      <div class="corebar-right">
+        <span id="coreFacts" class="facts"></span>
+      </div>
+    </div>
+
+    <div id="stage" class="stage">
+      <canvas id="canvas"></canvas>
+
+      <div class="hud hud-topleft">
+        <div id="readout" class="readout">
+          <span class="readout-label">distance to pith</span>
+          <span id="readoutValue" class="readout-value">— mm</span>
+          <span id="readoutSub" class="readout-sub"></span>
+        </div>
+      </div>
+
+      <div class="hud hud-topright">
+        <div class="hud-card">
+          <label class="hud-row">
+            <span>circles</span>
+            <input id="nCircles" type="range" min="1" max="40" value="12">
+            <output id="nCirclesOut">12</output>
+          </label>
+          <label class="hud-row">
+            <span>density</span>
+            <input id="climLo" type="number" step="25" value="200" title="lower limit, kg/m³">
+            <input id="climHi" type="number" step="25" value="1200" title="upper limit, kg/m³">
+          </label>
+          <label class="hud-row hud-checks">
+            <span><input id="showRings" type="checkbox" checked> rings</span>
+            <span><input id="showLabels" type="checkbox"> years</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="hud hud-bottomleft">
+        <div id="scalebar" class="scalebar"><span id="scalebarLabel">1 mm</span></div>
+      </div>
+
+      <div class="hud hud-bottomright">
+        <div class="zoom-group">
+          <button id="btnZoomOut" class="icon-btn" title="Zoom out (−)">−</button>
+          <span id="zoomLabel">100%</span>
+          <button id="btnZoomIn" class="icon-btn" title="Zoom in (+)">+</button>
+          <button id="btnFit" class="ghost-btn small" title="Reset the view (R)">Reset view</button>
+        </div>
+      </div>
+
+      <div id="offscreenHint" class="offscreen-hint hidden">
+        the core is off-screen — <button id="btnHintReset">reset the view</button>
+      </div>
+      <div id="stageMessage" class="stage-message hidden"></div>
+    </div>
+
+    <section class="panel">
+      <nav class="method-tabs" role="tablist">
+        <button class="tab active" data-method="concentric">
+          <b>1</b> Concentric circles
+          <em>pith missed by the core</em>
+        </button>
+        <button class="tab" data-method="indicated">
+          <b>2</b> Pith on the core
+          <em>offset is 0 mm</em>
+        </button>
+        <button class="tab" data-method="geometric">
+          <b>3</b> Diameter &amp; bark
+          <em>pith not reachable by circles</em>
+        </button>
+      </nav>
+
+      <div class="panel-body">
+
+        <div class="method-pane" data-pane="concentric">
+          <p class="hint">
+            Move the cursor into the wood to the left of the innermost ring. The
+            circles are drawn through the innermost indicated rings, so slide the
+            centre until they follow the ring curvature, then <b>click</b> to place
+            the pith. Drag to pan, scroll to zoom.
+          </p>
+          <div class="measure-grid">
+            <div class="measure"><span>perpendicular</span><b id="mPerp">—</b></div>
+            <div class="measure"><span>centre-to-centre</span><b id="mEuclid">—</b></div>
+            <div class="measure"><span>pith position</span><b id="mPos">—</b></div>
+          </div>
+        </div>
+
+        <div class="method-pane hidden" data-pane="indicated">
+          <p class="hint">
+            The pith itself is visible on this core, so the innermost indicated
+            ring sits at the pith and the offset is zero. Nothing else to enter.
+          </p>
+          <div class="zero-badge">distance to pith = <b>0.00 mm</b></div>
+        </div>
+
+        <div class="method-pane hidden" data-pane="geometric">
+          <p class="hint">
+            For cores that are too short, or whose centre has rotted away. The
+            offset is the barkless radius minus the shrinkage-corrected
+            accumulated ring width of this core.
+          </p>
+          <div class="form-grid">
+            <label>
+              <span>Species</span>
+              <select id="species"></select>
+            </label>
+            <label>
+              <span>Radial shrinkage S<sub>r</sub></span>
+              <input id="sr" type="number" step="0.001" min="0" max="0.499">
+            </label>
+            <label>
+              <span>Single bark thickness (mm)</span>
+              <input id="bark" type="number" step="0.1" min="0" placeholder="e.g. 8.5">
+            </label>
+            <label>
+              <span id="diamLabel">Diameter over bark (mm)</span>
+              <span class="input-with-toggle">
+                <input id="diameter" type="number" step="0.1" min="0" placeholder="e.g. 420">
+                <button id="btnDiamMode" class="ghost-btn small" title="Switch between diameter and circumference">⌀ / C</button>
+              </span>
+            </label>
+            <label class="advanced">
+              <span>Unmeasured wood outside the last ring (mm)</span>
+              <input id="outerGap" type="number" step="0.1" min="0" value="0">
+            </label>
+          </div>
+          <div id="geoWork" class="workings"></div>
+        </div>
+
+      </div>
+
+      <footer class="panel-foot">
+        <label class="notes">
+          <span>Notes</span>
+          <input id="notes" type="text" placeholder="optional — e.g. rotten centre, ring curvature unclear">
+        </label>
+        <div class="foot-actions">
+          <button id="btnPrev" class="ghost-btn">← Previous</button>
+          <button id="btnSkip" class="ghost-btn">Skip</button>
+          <button id="btnSave" class="primary-btn" disabled>Save &amp; next →</button>
+        </div>
+      </footer>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<!-- manual -->
+<div id="manualModal" class="modal hidden">
+  <div class="modal-card">
+    <header>
+      <h2>Manual</h2>
+      <button class="icon-btn close" data-close="manualModal">✕</button>
+    </header>
+    <div class="modal-body">
+      <h3>What this tool does</h3>
+      <p>
+        It reads a folder of RingIndicator output. Cores are grouped into trees by
+        name: the last part of the name identifies the core, and everything before
+        it is the tree. So <code>KOR-014-<b>A</b></code> and
+        <code>KOR-014-<b>B</b></code> are two cores of tree <code>KOR-014</code>, and
+        so are <code>KOR-014-<b>A2</b></code> and <code>KOR-014-<b>A3</b></code>, or
+        <code>GHE-Q003-<b>1</b></code> and <code>GHE-Q003-<b>2</b></code>. For each
+        tree the core that reaches <b>furthest back in time</b> (lowest indicated
+        year) is opened; on an equal oldest year the higher number wins, so A3 is
+        preferred to A2. Every core of the tree is listed beside the tree name, so
+        one click switches to another. It shows the transverse
+        preview <code>&lt;core&gt;_Tv.tif</code>, windowed to 200–1200&nbsp;kg/m³, with the
+        indication lines from <code>&lt;core&gt;_ring_and_fibre.txt</code> drawn on top.
+        Your estimate is written to <code>pith_offsets.xlsx</code> in that same folder.
+      </p>
+
+      <h3>The three cases</h3>
+      <ol>
+        <li>
+          <b>Concentric circles</b> (default). The core missed the pith. Circles are
+          drawn around the cursor through each of the innermost indicated rings.
+          Position the centre so the circles follow the curvature of the real rings
+          and click. The saved offset is the <b>perpendicular</b> distance from that
+          point to the innermost indicated ring — the same direction in which
+          RingIndicator measures its tilt-corrected ring widths.
+        </li>
+        <li>
+          <b>Pith on the core.</b> The pith is visible and already indicated, so the
+          offset is 0&nbsp;mm.
+        </li>
+        <li>
+          <b>Diameter &amp; bark.</b> The core is too short, or the centre has rotted,
+          so no curvature is usable. Enter the single bark thickness and the tree
+          diameter over bark at coring height (the ⌀/C button switches the field to
+          circumference). The offset is then
+          <code>D/2 − bark − ΣRW/(1−S<sub>r</sub>)</code>, where ΣRW is the accumulated
+          indicated ring width of this core and S<sub>r</sub> is the total green →
+          oven-dry radial shrinkage of the species. The cores were oven dried, so
+          this correction expands the measured widths back to their green size.
+        </li>
+      </ol>
+
+      <h3>Species and shrinkage</h3>
+      <p>
+        Case 3 needs a species, for its radial shrinkage. Pick it once and it
+        carries to the next tree, so a folder of one species is chosen once;
+        the bark and diameter fields are always cleared between trees, because a
+        carried-over diameter would be both wrong and invisible.
+      </p>
+      <p>
+        The shipped S<sub>r</sub> values are the CIRAD Tropix figures for temperate
+        species. Every one is editable — <b>Species table</b> in the top bar — and
+        whichever value was used is written into each saved row together with its
+        source, so a row always says where its number came from. Edits are kept in
+        <code>pith_species_shrinkage.csv</code> next to the data.
+      </p>
+
+      <h3>Controls</h3>
+      <table class="keys">
+        <tr><td>drag</td><td>pan</td></tr>
+        <tr><td>scroll / +&nbsp;−</td><td>zoom at the cursor</td></tr>
+        <tr><td>click</td><td>place the pith (click again to move it)</td></tr>
+        <tr><td>1 &nbsp;2 &nbsp;3</td><td>switch case</td></tr>
+        <tr><td>[ &nbsp;]</td><td>fewer / more circles</td></tr>
+        <tr><td>R</td><td>reset the view</td></tr>
+        <tr><td>Enter</td><td>save and go to the next tree</td></tr>
+        <tr><td>Esc</td><td>clear the placed pith</td></tr>
+      </table>
+
+      <h3>Stopping and resuming</h3>
+      <p>
+        Results are written after every save, to <code>pith_offsets.xlsx</code> and to
+        <code>pith_offsets.json</code> beside it. Restart the tool on the same folder
+        and it reopens at the first tree that has no result yet; finished trees are
+        ticked in the list and can be reopened to overwrite.
+      </p>
+
+      <h3>Output columns</h3>
+      <p>
+        <code>Distance_to_Pith_mm</code> is the column to merge into your metadata —
+        it is the one <code>bakker_bai()</code> wants. The rest of the row records how
+        that number was reached: the method, the measured perpendicular and
+        centre-to-centre distances, the diameter/bark/S<sub>r</sub> inputs, the
+        accumulated ring width both oven-dry and green, the pixel size, the clicked
+        position, and a <code>Flag</code> column for results worth a second look.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- species table -->
+<div id="speciesModal" class="modal hidden">
+  <div class="modal-card wide">
+    <header>
+      <h2>Species table — radial shrinkage</h2>
+      <button class="icon-btn close" data-close="speciesModal">✕</button>
+    </header>
+    <div class="modal-body">
+      <p class="hint">
+        S<sub>r</sub> is the total green → oven-dry <b>radial</b> shrinkage as a
+        fraction, used as <code>RW<sub>green</sub> = RW / (1 − S<sub>r</sub>)</code>.
+        The shipped values are the CIRAD Tropix figures for temperate species. Add
+        or correct rows as you need: whichever value a measurement used is written
+        into its row in the spreadsheet along with the source text below, so it
+        stays traceable. Anything you type in <b>Source</b> containing the word
+        <i>verify</i> is flagged with a <span class="pill warn">verify</span> marker
+        in the dropdown, which is a handy way to mark a number you are unsure of.
+        Saving writes <code>pith_species_shrinkage.csv</code> next to your data.
+      </p>
+      <table id="speciesTable" class="species-table"></table>
+      <div class="modal-actions">
+        <button id="btnAddSpecies" class="ghost-btn">Add species</button>
+        <button id="btnSaveSpecies" class="primary-btn">Save table</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

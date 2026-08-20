@@ -1,0 +1,15 @@
+# rendered preview cache, rebuilt on demand
+.pith_cache/
+
+# results and species table live next to the DATA, not in the repo, but keep
+# them ignored in case the tool is ever pointed at the repo folder itself
+pith_offsets.json
+pith_offsets.xlsx
+pith_species_shrinkage.csv
+pith_species_shrinkage.old.csv
+
+# a portable Python unzipped here by hand for an offline machine
+python/
+
+__pycache__/
+*.pyc
