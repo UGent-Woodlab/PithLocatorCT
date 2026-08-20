@@ -56,26 +56,48 @@ Per core, named after the core stem:
 
 ## How cores are grouped into trees
 
-The **last part of the name is the core**; everything before it is the tree.
+Two naming conventions are recognised.
+
+**The usual dendrochronology convention, no separator at all**: a site code and
+tree number ending in a digit, then a one- or two-letter core id, then an
+optional number if that core was scanned in several **sections**:
+
+| files | tree | cores |
+|---|---|---|
+| `ABC123A`, `ABC123B` | `ABC123` | `A`, `B` |
+| `ABC123A1`, `ABC123A2` | `ABC123` | core `A`, sections `1` and `2` |
+| `SHP856A2N1`, `SHP856A2N2` | `SHP856A2` | `N1`, `N2` |
+
+This is only applied when at least one *other* name in the folder confirms it —
+some other file's split lands on the same tree. A lone `ABC123A` with nothing
+else `ABC123`-shaped in the folder is left whole, because on its own it might
+just as well be a complete, unsplit name; splitting it would invent a tree that
+doesn't otherwise exist. Once confirmed anywhere in the folder, it is applied to
+every name in it, so `TreeID` stays one consistent shape throughout — never
+`ABC123` for one tree and `ABC124A` for another in the same output.
+
+**An explicit `-` or `_` separator**, which always wins when present, since it
+states outright where the tree name ends:
 
 | files | tree | cores |
 |---|---|---|
 | `KOR-014-A`, `KOR-014-B` | `KOR-014` | `A`, `B` |
-| `KOR-014-A2`, `KOR-014-A3` | `KOR-014` | `A2`, `A3` |
+| `KOR-014-A2`, `KOR-014-A3` | `KOR-014` | core `A`, sections `2` and `3` |
 | `GHE-Q003-1`, `GHE-Q003-2` | `GHE-Q003` | `1`, `2` |
-| `SHP856A2N1` | `SHP856A2N1` | — |
 
-A trailing token counts as a core id when it is up to two letters and up to three
-digits (`A`, `B2`, `A3`, `1`, `12`). Anything else — and any name with no `-` or
-`_` at all — is left as its own tree, which is the safe direction to fail: the
-core shows up on its own rather than being filed under a tree it does not belong
-to.
+A name matching neither convention is its own tree, which is the safe direction
+to fail: the core shows up on its own rather than being filed under a tree it
+does not belong to.
+
+**Sections** (`ABC123A1`/`ABC123A2`, or `KOR-014-A2`/`KOR-014-A3`) are pieces of
+one physical core that had to be scanned in parts, not separate cores. Case 3
+sums their ring width automatically — see below.
 
 The core opened for each tree is the one with the **lowest indicated year**, from
-`_ringwidth.txt`. On an equal oldest year the higher core number wins, so `A3` is
-opened rather than `A2` — a repeat scan of the same core is the later one. It is
-only a tie-break: a core that genuinely reaches further back is opened whatever
-its number. Cores with no preview image lose to cores that have one.
+`_ringwidth.txt`. On an equal oldest year the higher section number wins, which
+is an arbitrary but stable tie-break; a core that genuinely reaches further back
+is opened whatever its number. Cores with no preview image lose to cores that
+have one.
 
 Every core of the tree is listed beside the tree name with its oldest year, so
 switching to another is one click and nothing is ever hidden.
@@ -100,6 +122,12 @@ switching to another is one click and nothing is ever hidden.
    total green → oven-dry radial shrinkage of the species. The cores are oven
    dried, so this expands the measured widths back to their green size. The ⌀/C
    button switches the diameter field to circumference.
+
+   If the opened core was scanned in **sections** (see grouping above), `ΣRW`
+   sums the ring width of every section by default — a checkbox switches to
+   using only the opened section. The panel shows which files went into the
+   number, since measuring just one section of a broken core understates `ΣRW`
+   and silently inflates the distance to the pith.
 
 ## Species and shrinkage
 
@@ -134,8 +162,10 @@ of.
 `pith_offsets.xlsx` — one row per tree. `Distance_to_Pith_mm` is the column to
 merge into your metadata. The remaining columns record how the number was
 reached: method, the measured perpendicular and centre-to-centre distances, the
-diameter/bark/Sr inputs, accumulated ring width oven-dry and green, pixel size,
-the clicked position, and a `Flag` column for results worth a second look.
+diameter/bark/Sr inputs, accumulated ring width oven-dry and green,
+`AccumRW_Files` (which section files went into it, when the core has more than
+one), pixel size, the clicked position, and a `Flag` column for results worth a
+second look.
 
 `pith_offsets.json` holds the same rows and is what the tool reads on startup to
 work out where you left off: restart on the same folder and it reopens at the

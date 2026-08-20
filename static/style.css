@@ -265,6 +265,9 @@ input[type=checkbox] { accent-color: var(--accent); }
 .hint { margin: 0 0 10px; font-size: 12.5px; color: var(--text-2); max-width: 105ch; }
 .hint b { color: var(--text); font-weight: 600; }
 
+.checkline { display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+             color: var(--text-2); margin: 9px 0 0; cursor: pointer; }
+
 .measure-grid { display: flex; gap: 10px; flex-wrap: wrap; }
 .measure {
   background: var(--bg-3); border: 1px solid var(--line); border-radius: 8px;

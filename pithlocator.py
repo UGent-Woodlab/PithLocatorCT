@@ -280,45 +280,91 @@ def find_transverse(folder, stem):
 
 # --------------------------------------------------------------------------
 # core discovery and tree grouping
-
-# A core file name ends in a token that identifies the core within its tree:
 #
-#     GHE-Q003-1, GHE-Q003-2      tree GHE-Q003, cores 1 and 2
-#     KOR-014-A,  KOR-014-B       tree KOR-014,  cores A and B
-#     KOR-014-A2, KOR-014-A3      tree KOR-014,  cores A2 and A3
+# A core file name ends in a token that identifies the core within its tree.
+# Two conventions are recognised, tried in this order:
 #
-# The tree is everything before that last token. A2 and A3 are separate cores,
-# like A and B; the trailing number only breaks a tie in select_core below.
+#   1. An explicit "-" or "_" separator states outright where the tree name
+#      ends, so it always wins when present:
 #
-# A stem with no separator, or whose tail does not look like a core token, is
-# treated as its own tree. That is the safe direction to fail: it shows the core
-# on its own rather than silently filing it under a tree it does not belong to.
-CORE_TOKEN_RE = re.compile(r"^[A-Za-z]{0,2}\d{0,3}$")
-TOKEN_NUM_RE = re.compile(r"(\d+)$")
+#          GHE-Q003-1, GHE-Q003-2      tree GHE-Q003, cores 1 and 2
+#          KOR-014-A,  KOR-014-B       tree KOR-014,  cores A and B
+#          KOR-014-A2, KOR-014-A3      tree KOR-014,  cores A2 and A3
+#
+#   2. The common dendrochronology convention with NO separator at all: a site
+#      code and tree number (ending in a digit), then a one- or two-letter core
+#      id, then an optional number if that core was scanned in several pieces:
+#
+#          ABC123A,  ABC123B           tree ABC123, cores A and B
+#          ABC123A1, ABC123A2          tree ABC123, core A in two sections
+#
+# A2 and A3 -- or A1 and A2 -- are not two different cores: they are SECTIONS of
+# one physical core that had to be scanned in pieces, sharing a tree and a core
+# letter. See section_group() below, which sums their ring width for case 3.
+#
+# Convention 2 only applies when at least one OTHER stem in the same folder
+# confirms it, i.e. some other stem structurally splits to the same tree (see
+# the "confirmed" pass in scan_folder). Without that corroboration a name is
+# left whole rather than guessed at: "ABC123A" alone, with no ABC123-anything
+# else in the folder, might just as easily be a complete, unsuffixed name, and
+# splitting it would invent a tree "ABC123" that does not otherwise exist. This
+# also protects a lone id that only coincidentally ends in "letter(s)" -- a
+# site code ending in a letter, for instance -- from being carved up on no
+# evidence. The separator rule needs no such corroboration: an explicit
+# separator is a statement, not a guess.
+#
+# A stem matching neither convention is treated as its own tree. That is the
+# safe direction to fail: it shows the core on its own rather than silently
+# filing it under a tree it does not belong to.
+SEPARATOR_TOKEN_RE = re.compile(r"^[A-Za-z]{0,2}[0-9]{0,3}$")
+STRUCTURAL_RE = re.compile(r"^(?P<tree>.*[0-9])(?P<letter>[A-Za-z]{1,2})(?P<section>[0-9]{0,3})$")
+TOKEN_SPLIT_RE = re.compile(r"^(?P<letter>[A-Za-z]{0,2})(?P<section>[0-9]{0,3})$")
 
 
-def parse_stem(stem):
-    """(tree, core token) for a core file stem."""
+def parse_stem_separator(stem):
+    """Try the explicit "-"/"_" rule. (tree, token) if it applies, else None."""
     cut = max(stem.rfind("-"), stem.rfind("_"))
     if cut <= 0:
-        return stem, ""
+        return None
     tail = stem[cut + 1:]
-    if not tail or not CORE_TOKEN_RE.match(tail):
-        return stem, ""
+    if not tail or not SEPARATOR_TOKEN_RE.match(tail):
+        return None
     return stem[:cut], tail
 
 
-def token_version(token):
-    """Repeat-scan number of a core token: A3 -> 3, A -> 0, B10 -> 10.
+def parse_stem_structural(stem):
+    """Try the no-separator convention. (tree, token) if it applies, else None.
 
-    Zero for a purely numeric token, because there the number identifies the
-    core itself -- GHE-Q003-1 and GHE-Q003-2 are two different cores, so "2" is
-    no reason to prefer one over the other.
+    token is the core letter plus its section number run together (e.g. "A2"),
+    matching the shape a separator-rule token already has, so both feed the
+    same core_letter()/section_number() below.
     """
-    if not token or not token[0].isalpha():
+    m = STRUCTURAL_RE.match(stem)
+    if not m:
+        return None
+    return m.group("tree"), m.group("letter") + m.group("section")
+
+
+def core_letter(token):
+    """Letter part of a core token: "A2" -> "A", "B" -> "B", "1" -> ""."""
+    m = TOKEN_SPLIT_RE.match(token or "")
+    return m.group("letter") if m else ""
+
+
+def section_number(token):
+    """Section number within a core: "A2" -> 2, "A" -> 0, "1" -> 0.
+
+    A core broken up during scanning is split into sections that share a tree
+    and a core letter, e.g. A1 and A2 are two pieces of core A -- see
+    section_group() below, which groups them for summing case 3's ring width.
+    Zero for a purely numeric token, because there the number identifies the
+    core itself: GHE-Q003-1 and GHE-Q003-2 are two different cores, not two
+    sections of one, so "2" is not a section number.
+    """
+    m = TOKEN_SPLIT_RE.match(token or "")
+    if not m or not m.group("letter") or not m.group("section"):
         return 0
-    m = TOKEN_NUM_RE.search(token)
-    return int(m.group(1)) if m else 0
+    return int(m.group("section"))
 
 
 def scan_folder(folder):
@@ -342,12 +388,9 @@ def scan_folder(folder):
         accum_px = float(np.nansum(np.array(rw["widths_px"]))) if rw["widths_px"] else 0.0
 
         tv = find_transverse(folder, stem)
-        tree, core_token = parse_stem(stem)
 
         cores[stem] = {
             "stem": stem,
-            "tree": tree,
-            "core_token": core_token,
             "n_boundaries": int(len(zpos)),
             "n_widths": rw["n_widths"],
             "oldest_year": oldest,
@@ -365,6 +408,13 @@ def scan_folder(folder):
             "widths_px": rw["widths_px"],
         }
 
+    # Tree/core assignment needs every stem in the folder at once: the
+    # structural convention is only accepted when some OTHER stem confirms it
+    # (see resolve_stem_names), which cannot be decided one file at a time.
+    for stem, (tree, token) in resolve_stem_names(list(cores)).items():
+        cores[stem]["tree"] = tree
+        cores[stem]["core_token"] = token
+
     trees = {}
     for stem, c in cores.items():
         trees.setdefault(c["tree"], []).append(stem)
@@ -374,6 +424,34 @@ def scan_folder(folder):
         stems = sorted(trees[tree])
         out.append({"tree": tree, "cores": stems, "selected": select_core(cores, stems)})
     return cores, out
+
+
+def resolve_stem_names(stems):
+    """(tree, core token) for every stem, deciding the structural convention
+    once for the whole folder. See the module comment above for why."""
+    tentative = {}
+    for stem in stems:
+        sep = parse_stem_separator(stem)
+        if sep is not None:
+            tentative[stem] = ("sep",) + sep
+            continue
+        struct = parse_stem_structural(stem)
+        if struct is not None:
+            tentative[stem] = ("struct",) + struct
+            continue
+        tentative[stem] = ("self", stem, "")
+
+    struct_trees = {}
+    for stem, (kind, tree, _token) in tentative.items():
+        if kind == "struct":
+            struct_trees.setdefault(tree, []).append(stem)
+    confirmed = any(len(v) >= 2 for v in struct_trees.values())
+
+    resolved = {}
+    for stem, (kind, tree, token) in tentative.items():
+        resolved[stem] = (stem, "") if (kind == "struct" and not confirmed) \
+            else (tree, token)
+    return resolved
 
 
 def read_ringwidth_empty():
@@ -386,11 +464,15 @@ def select_core(cores, stems):
     The core of a tree that reaches furthest back: lowest oldest indicated year.
     Cores with no image cannot be worked on, so they lose to ones that have one.
 
-    On an equal oldest year the higher core-token number wins, so A3 is opened
-    in preference to A2 -- a repeat scan of the same core is the later one. It
-    is only a tie-break: a core that genuinely reaches further back still wins
-    whatever its number. Every core of the tree stays listed either way, so a
-    wrong pick is one click to correct and nothing is ever hidden.
+    On an equal oldest year the higher section number wins -- e.g. between two
+    sections of one broken core, A3 opens rather than A2. There is no real
+    reason to prefer one section over another this way, but the choice needs to
+    be *something* and it needs to be stable, and the previous behaviour (before
+    sections were understood to be pieces of one core rather than repeat scans)
+    already picked this way. It is only a tie-break: a core that genuinely
+    reaches further back wins whatever its number. Every core of the tree stays
+    listed either way, so a wrong pick is one click to correct and nothing is
+    ever hidden.
     """
     def key(stem):
         c = cores[stem]
@@ -398,7 +480,7 @@ def select_core(cores, stems):
         return (
             0 if c["has_image"] else 1,
             oy if oy is not None else float("inf"),
-            -token_version(c["core_token"]),
+            -section_number(c["core_token"]),
             -c["n_boundaries"],
             -(c["accum_rw_px"] or 0.0),
             stem,
@@ -502,6 +584,7 @@ COLUMNS = [
     ("Diameter_Entered_As", "diameter_input"),
     ("Barkless_Radius_mm", "barkless_radius_mm"),
     ("AccumRW_ovendry_mm", "accum_ovendry_mm"),
+    ("AccumRW_Files", "accum_files"),
     ("Sr_radial_shrinkage", "sr"),
     ("AccumRW_green_mm", "accum_green_mm"),
     ("Outer_Gap_mm", "outer_gap_mm"),
@@ -622,6 +705,23 @@ class App(object):
     def species_names(self):
         return [s["name"] for s in self.species]
 
+    def section_group(self, stem):
+        """Every core sharing this one's tree and core letter, sorted by
+        section number -- the pieces of one physical core that was scanned in
+        parts. [stem] alone when its token has no letter, or has no siblings.
+        """
+        c = self.cores.get(stem)
+        if c is None:
+            return [stem]
+        letter = core_letter(c["core_token"])
+        if not letter:
+            return [stem]
+        group = [s for s, sc in self.cores.items()
+                 if sc["tree"] == c["tree"] and core_letter(sc["core_token"]) == letter]
+        if len(group) <= 1:
+            return [stem]
+        return sorted(group, key=lambda s: section_number(self.cores[s]["core_token"]))
+
     def session(self):
         trees = []
         for t in self.trees:
@@ -675,6 +775,22 @@ class App(object):
                 "n_rings": sc["n_boundaries"], "has_image": sc["has_image"],
                 "accum_rw_mm": sc["accum_rw_mm"], "selected": s == stem,
             })
+
+        # A core scanned in pieces has its ring width spread across several
+        # files; case 3 needs the sum of all of them, not just the one opened.
+        group = self.section_group(stem)
+        sections = None
+        accum_rw_mm_sum = None
+        if len(group) > 1:
+            sections = [{
+                "stem": s,
+                "accum_rw_mm": self.cores[s]["accum_rw_mm"],
+                "oldest_year": self.cores[s]["oldest_year"],
+            } for s in group]
+            vals = [s["accum_rw_mm"] for s in sections]
+            if any(v is not None for v in vals):
+                accum_rw_mm_sum = round(sum(v for v in vals if v is not None), 3)
+
         return {
             "tree": tree_id,
             "stem": stem,
@@ -688,6 +804,8 @@ class App(object):
             "fell_date": c["fell_date"],
             "accum_rw_px": c["accum_rw_px"],
             "accum_rw_mm": c["accum_rw_mm"],
+            "sections": sections,
+            "accum_rw_mm_sum": accum_rw_mm_sum,
             "n_missing": c["n_missing"],
             "n_broken": c["n_broken"],
             "has_image": c["has_image"],
@@ -896,11 +1014,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, "bark thickness is required")
             if diam is None or diam <= 0:
                 return self._err(400, "tree diameter is required")
-            accum = core["accum_rw_mm"]
-            if accum is None:
+
+            # A core scanned in sections has its ring width spread across
+            # several files; sum them unless the operator asked to use only
+            # the opened one. Falls back to the single file when there is only
+            # one, so existing single-file data behaves exactly as before.
+            sum_sections = payload.get("sum_sections")
+            if sum_sections is None:
+                sum_sections = True
+            group = self.app.section_group(d["stem"]) if sum_sections else [d["stem"]]
+            if len(group) <= 1:
+                group = [d["stem"]]
+            accum_vals = [self.app.cores[s]["accum_rw_mm"] for s in group]
+            if not any(v is not None for v in accum_vals):
                 return self._err(
                     400, "no pixel size in %s_ringwidth.txt, so the accumulated "
                          "ring width cannot be converted to mm" % d["stem"])
+            accum = sum(v for v in accum_vals if v is not None)
+
             green = accum / (1.0 - sr)
             barkless_r = diam / 2.0 - bark
             dist = barkless_r - green - gap
@@ -910,6 +1041,8 @@ class Handler(BaseHTTPRequestHandler):
                 "bark_mm": bark, "diameter_mm": diam,
                 "diameter_input": payload.get("diameter_input") or "diameter",
                 "barkless_radius_mm": _round(barkless_r, 3),
+                "accum_ovendry_mm": _round(accum, 3),
+                "accum_files": " + ".join(group),
                 "accum_green_mm": _round(green, 3),
                 "outer_gap_mm": gap,
                 "distance_mm": _round(dist, 3),

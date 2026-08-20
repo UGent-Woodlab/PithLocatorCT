@@ -26,6 +26,7 @@ const S = {
   mmPerWorld: null,
   method: 'concentric',
   lastSpecies: null,   // sticky across trees; see applySaved
+  onlyOpenedSection: false,  // case 3: sum a broken core's sections by default
   view: { k: 1, tx: 0, ty: 0 },
   pith: null,          // {x, y} world, placed
   hover: null,         // {x, y} world, live
@@ -187,6 +188,7 @@ function renderFacts() {
   bits.push('<b>' + c.n_boundaries + '</b> rings');
   if (c.oldest_year !== null) bits.push('oldest <b>' + c.oldest_year + '</b>');
   if (c.accum_rw_mm !== null) bits.push('ΣRW <b>' + fmt(c.accum_rw_mm, 1) + '</b> mm');
+  if (c.sections) bits.push('<b>' + c.sections.length + '</b> sections of this core');
   bits.push(c.res_um ? '<b>' + fmt(c.res_um, 2) + '</b> µm/px' : '<b>no pixel size</b>');
   if (c.n_missing) bits.push(c.n_missing + ' missing');
   if (c.n_broken) bits.push(c.n_broken + ' fractures');
@@ -201,6 +203,11 @@ function applySaved(saved) {
   ['bark', 'diameter'].forEach((id) => { $(id).value = ''; });
   $('outerGap').value = '0';
   setDiamMode('diameter');
+  // Sections belong to this core, not the last one visited, so default back
+  // to summing them unless this tree's own saved row used only one.
+  S.onlyOpenedSection = !!(saved && saved.accum_files &&
+    saved.accum_files.indexOf('+') < 0 && saved.accum_files === S.core.stem);
+  $('onlyOpenedSection').checked = S.onlyOpenedSection;
   $('notes').value = saved ? (saved.notes || '') : '';
   // Precedence: what this tree was saved with, else the last species picked in
   // this session, else the placeholder. Sticky is what replaces the removed
@@ -574,12 +581,23 @@ function updateScalebar() {
 
 /* ------------------------------------------------------------ geometric */
 
+/** ΣRW to use for case 3: summed across the opened core's sections unless the
+ *  operator asked to use only the one that is open. A core with no sections
+ *  (S.core.sections is null) just uses its own accum_rw_mm either way. */
+function sectionsAccum() {
+  const core = S.core;
+  if (!core || !core.sections) return { value: core ? core.accum_rw_mm : null, summed: false };
+  if (S.onlyOpenedSection) return { value: core.accum_rw_mm, summed: false };
+  return { value: core.accum_rw_mm_sum, summed: true };
+}
+
 function computeGeometric() {
   const sr = parseFloat($('sr').value);
   const bark = parseFloat($('bark').value);
   const raw = parseFloat($('diameter').value);
   const gap = parseFloat($('outerGap').value) || 0;
-  const accum = S.core ? S.core.accum_rw_mm : null;
+  const acc = sectionsAccum();
+  const accum = acc.value;
 
   if (accum === null || accum === undefined)
     return { ok: false, why: 'no pixel size, so ΣRW cannot be converted to mm' };
@@ -593,12 +611,15 @@ function computeGeometric() {
   const diameter = S.diamMode === 'circumference' ? raw / Math.PI : raw;
   const green = accum / (1 - sr);
   const barkless = diameter / 2 - bark;
-  return { ok: true, sr, bark, diameter, gap, accum, green, barkless,
+  return { ok: true, sr, bark, diameter, gap, accum, green, barkless, summed: acc.summed,
            dist: barkless - green - gap };
 }
 
 function updateGeoWork() {
   const box = $('geoWork');
+  const sections = S.core && S.core.sections;
+  $('sectionsRow').classList.toggle('hidden', !sections);
+
   const g = computeGeometric();
   if (!g.ok) {
     box.innerHTML = '<span class="err">' + esc(g.why) + '</span>';
@@ -608,9 +629,24 @@ function updateGeoWork() {
   const srcRow = $('species').selectedOptions[0];
   const src = srcRow ? srcRow.dataset.source : '';
   const manual = srcRow && Math.abs(parseFloat(srcRow.dataset.sr) - g.sr) > 1e-9;
+
+  // A core scanned in sections has its ring width spread across several
+  // files; show which ones went into ΣRW rather than a bare number, since
+  // that composition is easy to get wrong silently.
+  let accumLine = 'ΣRW oven-dry     = ' + fmt(g.accum, 2) + ' mm';
+  if (sections && g.summed) {
+    const parts = sections.map((s) =>
+      s.accum_rw_mm === null ? '? (' + s.stem + ')' : fmt(s.accum_rw_mm, 2));
+    accumLine = 'ΣRW oven-dry     = ' + parts.join(' + ') + ' = ' + fmt(g.accum, 2) +
+      ' mm   (' + sections.map((s) => s.stem).join(' + ') + ')';
+  } else if (sections) {
+    accumLine += '   (' + S.core.stem + ' only — other sections of this core excluded)';
+  }
+
   box.innerHTML =
     'barkless radius  = ' + fmt(g.diameter, 1) + ' / 2 − ' + fmt(g.bark, 1) +
       '  = ' + fmt(g.barkless, 2) + ' mm\n' +
+    accumLine + '\n' +
     'ΣRW green        = ' + fmt(g.accum, 2) + ' / (1 − ' + fmt(g.sr, 3) + ')' +
       '  = ' + fmt(g.green, 2) + ' mm\n' +
     (g.gap ? 'unmeasured wood  = ' + fmt(g.gap, 2) + ' mm\n' : '') +
@@ -737,6 +773,7 @@ async function save(advance) {
       sr: g.sr, bark_mm: g.bark, diameter_mm: g.diameter,
       diameter_input: S.diamMode, outer_gap_mm: g.gap,
       sr_source: manual ? 'manual override' : (o ? o.dataset.source : ''),
+      sum_sections: !S.onlyOpenedSection,
     });
   }
   $('btnSave').disabled = true;
@@ -906,6 +943,10 @@ function wireUI() {
   });
   ['sr', 'bark', 'diameter', 'outerGap'].forEach((id) =>
     $(id).addEventListener('input', updateGeoWork));
+  $('onlyOpenedSection').addEventListener('change', (e) => {
+    S.onlyOpenedSection = e.target.checked;
+    updateGeoWork();
+  });
   $('species').addEventListener('change', () => {
     S.lastSpecies = $('species').value || null;
     syncSrFromSpecies();

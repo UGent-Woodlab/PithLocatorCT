@@ -175,6 +175,10 @@
               <input id="outerGap" type="number" step="0.1" min="0" value="0">
             </label>
           </div>
+          <label id="sectionsRow" class="checkline hidden">
+            <input id="onlyOpenedSection" type="checkbox">
+            <span>use only the opened section, not the sum of all sections of this core</span>
+          </label>
           <div id="geoWork" class="workings"></div>
         </div>
 
@@ -209,15 +213,22 @@
       <h3>What this tool does</h3>
       <p>
         It reads a folder of RingIndicator output. Cores are grouped into trees by
-        name: the last part of the name identifies the core, and everything before
-        it is the tree. So <code>KOR-014-<b>A</b></code> and
-        <code>KOR-014-<b>B</b></code> are two cores of tree <code>KOR-014</code>, and
-        so are <code>KOR-014-<b>A2</b></code> and <code>KOR-014-<b>A3</b></code>, or
-        <code>GHE-Q003-<b>1</b></code> and <code>GHE-Q003-<b>2</b></code>. For each
-        tree the core that reaches <b>furthest back in time</b> (lowest indicated
-        year) is opened; on an equal oldest year the higher number wins, so A3 is
-        preferred to A2. Every core of the tree is listed beside the tree name, so
-        one click switches to another. It shows the transverse
+        name, two conventions recognised. The usual dendrochronology naming with
+        <b>no separator</b>: a site code and tree number, then a core letter, so
+        <code>ABC123<b>A</b></code> and <code>ABC123<b>B</b></code> are two cores
+        of tree <code>ABC123</code> — accepted once some other name in the folder
+        confirms the same tree, so a lone name is never guessed at. Or an
+        explicit <code>-</code>/<code>_</code> separator, which always wins when
+        present: <code>KOR-014-<b>A</b></code> and <code>KOR-014-<b>B</b></code>
+        are two cores of <code>KOR-014</code>. Either way, a further number —
+        <code>ABC123<b>A1</b></code>/<code>ABC123<b>A2</b></code>,
+        <code>KOR-014-<b>A2</b></code>/<code>KOR-014-<b>A3</b></code> — marks
+        <b>sections</b> of one physical core scanned in pieces, not separate
+        cores; case 3 sums their ring width. For each tree the core that reaches
+        <b>furthest back in time</b> (lowest indicated year) is opened; on an
+        equal oldest year the higher section number wins. Every core of the tree
+        is listed beside the tree name, so one click switches to another. It
+        shows the transverse
         preview <code>&lt;core&gt;_Tv.tif</code>, windowed to 200–1200&nbsp;kg/m³, with the
         indication lines from <code>&lt;core&gt;_ring_and_fibre.txt</code> drawn on top.
         Your estimate is written to <code>pith_offsets.xlsx</code> in that same folder.
@@ -246,6 +257,9 @@
           indicated ring width of this core and S<sub>r</sub> is the total green →
           oven-dry radial shrinkage of the species. The cores were oven dried, so
           this correction expands the measured widths back to their green size.
+          If this core has sections, ΣRW sums all of them by default — a
+          checkbox switches to only the opened section, and the panel always
+          shows which files went into the number.
         </li>
       </ol>
 

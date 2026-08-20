@@ -70,11 +70,25 @@ These are the things that look wrong and are not, or that break silently.
    species is visible in the dropdown and saves re-picking it for a whole folder.
    Do not "fix" this asymmetry — see `applySaved`.
 
-7. **A core with no recognisable trailing token becomes its own tree.** That is
-   deliberate: showing a core alone is recoverable, filing it under the wrong
-   tree is not. See `parse_stem`.
+7. **The no-separator naming convention only applies when the folder confirms
+   it.** `parse_stem_structural` reads `ABC123A` as tree `ABC123`, core `A`, but
+   `resolve_stem_names` only accepts that split when some *other* stem's
+   structural split lands on the same tree -- once confirmed anywhere in the
+   folder it applies to every stem, so `TreeID` never mixes split and unsplit
+   shapes in one output. A stem matching neither the separator rule nor the
+   structural rule becomes its own tree: showing a core alone is recoverable,
+   filing it under the wrong tree is not.
 
-8. **The species CSV is versioned.** `pith_species_shrinkage.csv` in a data
+8. **Sections are pieces of one broken core, not separate cores or repeat
+   scans.** `ABC123A1`/`ABC123A2` (or `KOR-014-A2`/`KOR-014-A3`) share a tree
+   and a core letter (`core_letter`), differing only in `section_number`.
+   `App.section_group()` finds all of them; case 3 sums their `accum_rw_mm` by
+   default (`_save_result`'s `sum_sections`, default `True`) because measuring
+   only the opened section understates ΣRW and silently inflates the computed
+   distance to the pith. Do not "simplify" this back to a single file's value
+   -- that is the bug this was written to fix.
+
+9. **The species CSV is versioned.** `pith_species_shrinkage.csv` in a data
    folder overrides the shipped table, so it carries a version marker; a file
    from an older build is moved to `.old.csv` rather than read or deleted. Bump
    `SPECIES_TABLE_VERSION` whenever the shipped values change, or users keep
@@ -118,16 +132,21 @@ Test folders are built from the RingIndicator fixtures in
 `tests/fixtures/CAM633-3_*`: take the outermost *n* boundaries to make a core
 that starts at a younger year, and rename the stems to exercise the grouping
 rules (`TREE-A`/`TREE-B`, `TREE-A2`/`TREE-A3` with equal and with differing
-oldest years, a name with no separator, and one core with no `_Tv.tif`).
+oldest years, the no-separator convention, a name with no separator that
+should NOT split, and one core with no `_Tv.tif`).
 
 Worth re-checking after any change to grouping or selection:
 
 | fixture | expected |
 |---|---|
 | `TREE1-A` (young) + `TREE1-B` (old) | `TREE1-B` opens — year wins |
-| `TREE2-A2` + `TREE2-A3`, same year | `TREE2-A3` opens — number breaks the tie |
+| `TREE2-A2` + `TREE2-A3`, same year | `TREE2-A3` opens — section number breaks the tie |
 | `TREE3-A2` (old) + `TREE3-A3` (young) | `TREE3-A2` opens — year beats the number |
-| `SHP856A2N1` | its own tree, not filed under `SHP856A2N` |
+| `ABC123A` + `ABC123B` | tree `ABC123`, cores `A`/`B` -- structural, no separator |
+| `ABC123A` alone, no sibling in the folder | its own tree `ABC123A`, NOT split -- unconfirmed |
+| `ABC123A` + `ABC124A` in the same folder | two trees, `ABC123`/`ABC124` -- never merged |
+| `XYZ200A1` + `XYZ200A2` | one tree, one core in two sections; case 3's ΣRW is their sum |
+| `SHP856A2N1` alone | its own tree, not filed under `SHP856A2N` |
 
 `run.bat` cannot be executed in the sandbox. Its winget branch is the one path
 that has never run on real Windows; review it by reading, and be careful with
