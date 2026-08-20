@@ -857,7 +857,6 @@ class Handler(BaseHTTPRequestHandler):
             "other_cores": ", ".join(s for s in
                                      next(t["cores"] for t in self.app.trees
                                           if t["tree"] == tree) if s != d["stem"]),
-            "species": payload.get("species") or "",
             "method": METHOD_LABEL[method],
             "n_rings": core["n_boundaries"],
             "oldest_year": core["oldest_year"],
@@ -906,6 +905,7 @@ class Handler(BaseHTTPRequestHandler):
             barkless_r = diam / 2.0 - bark
             dist = barkless_r - green - gap
             row.update({
+                "species": payload.get("species") or "",
                 "sr": sr, "sr_source": payload.get("sr_source") or "",
                 "bark_mm": bark, "diameter_mm": diam,
                 "diameter_input": payload.get("diameter_input") or "diameter",

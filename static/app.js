@@ -720,17 +720,20 @@ async function save(advance) {
   if (!S.core || $('btnSave').disabled) return;
   const body = {
     tree: S.core.tree, stem: S.core.stem, method: S.method,
-    species: $('species').value, notes: $('notes').value,
+    notes: $('notes').value,
   };
   if (S.method === 'concentric') {
     const m = measure(S.pith);
     Object.assign(body, { perp_mm: m.perp_mm, euclid_mm: m.euclid_mm,
                           pith_x_px: m.pith_x_px, pith_y_px: m.pith_y_px });
   } else if (S.method === 'geometric') {
+    // Species is only meaningful -- and only looked at by the operator -- for
+    // this case, so it is the only one that writes it into the saved row.
     const g = computeGeometric();
     const o = $('species').selectedOptions[0];
     const manual = o && Math.abs(parseFloat(o.dataset.sr) - g.sr) > 1e-9;
     Object.assign(body, {
+      species: $('species').value,
       sr: g.sr, bark_mm: g.bark, diameter_mm: g.diameter,
       diameter_input: S.diamMode, outer_gap_mm: g.gap,
       sr_source: manual ? 'manual override' : (o ? o.dataset.source : ''),
