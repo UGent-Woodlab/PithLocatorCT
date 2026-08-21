@@ -120,6 +120,39 @@ These are the things that look wrong and are not, or that break silently.
    `SPECIES_TABLE_VERSION` whenever the shipped values change, or users keep
    silently measuring against superseded numbers.
 
+11. **A colour or grayscale core's image is `<stem>.tif`, probed before it is
+   trusted.** RingIndicator writes no `_Tv.tif`/`_Rd.tif` for a flat (colour or
+   single-page) image — those only come from averaging slices out of a real
+   volume — so `find_core_image` falls back to `<stem>.tif`/`.tiff` when there
+   is no `_Tv.tif`. `probe_tiff` decides "flat" the same way RingIndicator's
+   `flat_by_depth` does (one page, or 3+ samples per pixel), but from real TIFF
+   tags rather than a `FileSize/StripByteCounts` guess, and **fails closed**: a
+   multi-page volume that happens to be named `<stem>.tif` is never shown as a
+   preview, because its page 0 is an edge slice, not the mid-core plane
+   RingIndicator averages. A rejected file's reason travels as `image_reject`
+   all the way to the UI, so a folder that visibly contains a TIFF doesn't just
+   say "no image" with no explanation. `render_png` never applies the CT
+   density window to a flat image (`kind != "ct_tv"`): it scales by dtype range,
+   or, for anything wider than 8-bit, a percentile stretch — the CT window
+   controls are hidden client-side (`supports_window`) rather than repurposed,
+   and `kind` is part of the preview cache key so a reclassified file can never
+   serve a stale render.
+
+12. **A flat core's pixel size never comes from `_ringwidth.txt` column 3.**
+   `readTiffTags.m` converts a TIFF's `XResolution` tag to µm/px only for
+   `ResolutionUnit` 1 and 3; for unit 2 (inch — the default for a scanner or
+   camera) it leaves the raw tag value unconverted, and that value is what ends
+   up in column 3. A CT core has no such gap to fall into by itself, so it keeps
+   using column 3, with a warning attached when the number looks like a raw DPI
+   or an unconverted tag rather than a pixel size — never a silent
+   substitution. A flat core has no such fallback, so for it the only sources
+   are an operator-entered value and `<stem>_resolution.txt` (RingIndicator's
+   own sidecar, read ahead of column 3 because its Resolution menu writes that
+   file when a number there is corrected). Column 1 of `_ringwidth.txt` — the
+   width itself — is in pixels, so none of this touches ring geometry or ΣRW in
+   pixels; only the µm/px multiplier that turns them into millimetres can be
+   wrong.
+
 ## The launchers
 
 `run.bat` and `run.sh` both do three things **in this order**, and the order is
@@ -151,15 +184,38 @@ python3 pithlocator.py /path/to/test/cores --port 8792 --no-browser
 
 Then drive it with Playwright (Chromium at `/opt/pw-browsers/chromium` in the
 cloud sandbox) and assert on the DOM: `#readoutValue`, `#geoWork`, `.tab.active`,
-`.chip.active`, `#btnSave` disabled state. Always check for zero console errors —
-two real bugs in this codebase were caught only by `pageerror`.
+`.chip.active`, `#btnSave` disabled state, plus `#climRow`'s hidden class (should
+follow `supports_window`, i.e. only visible for `ct_tv`) and `#pxRow`'s (should
+follow `res_editable`). Always check for zero console errors — two real bugs in
+this codebase were caught only by `pageerror`.
 
 Test folders are built from the RingIndicator fixtures in
 `tests/fixtures/CAM633-3_*`: take the outermost *n* boundaries to make a core
 that starts at a younger year, and rename the stems to exercise the grouping
 rules (`TREE-A`/`TREE-B`, `TREE-A2`/`TREE-A3` with equal and with differing
 oldest years, the no-separator convention, a name with no separator that
-should NOT split, and one core with no `_Tv.tif`).
+should NOT split, and one core with no `_Tv.tif`). Build each grouping scenario
+in its **own** folder rather than piling every stem into one: the no-separator
+convention is confirmed per-folder once any stem in it splits, so combining
+scenarios that are supposed to be unconfirmed (e.g. a lone `SHP856A2N1`) with
+one that confirms the same general shape elsewhere in the folder changes the
+outcome out from under the test — this is pre-existing behaviour, not a bug,
+but it will misdirect you if the fixtures are combined carelessly.
+
+For a colour or grayscale core, colourise the same fixture rather than
+synthesising a new one: window the CT plane to 8-bit and stack it into three
+channels with a **different tint per channel** (e.g. `[g//8, g, g]`) so a
+red-channel collapse (rendering only channel 0) is visually and numerically
+distinct (near-black, low mean) from a correct colour render. Useful variants:
+a plain uint8 RGB `<stem>.tif` with a `<stem>_resolution.txt`; the same with
+`ResolutionUnit=2` and a `_ringwidth.txt` column 3 equal to the raw `XResolution`
+value, to exercise the inch-fallthrough warning; a uint16 RGB version (`<<8`)
+to check the dtype-range scale does not clip to white; and a multi-page volume
+saved under the bare `<stem>.tif` name with **no** `_Tv.tif`, to confirm it is
+rejected rather than shown as page 0. The real fixtures `NF531B-1_ringwidth.txt`
+(column 3 = `667`, a raw pixels-per-cm tag) and
+`mask_NG-15-1_CROP2_TEST_ringwidth.txt` (column 3 = `72`, a bare DPI) are
+ready-made bad-resolution cases with no image needed.
 
 Worth re-checking after any change to grouping or selection:
 
@@ -176,6 +232,8 @@ Worth re-checking after any change to grouping or selection:
 | `GHE-F015-1-A` + `GHE-F015-1-B` + `GHE-F015-2` | one tree `GHE-F015`; `-1-A`/`-1-B` are sections of core 1 and their ΣRW sums; `-2` is its own core |
 | `GHE-F015-1-A` + `GHE-F015-1-B`, no `-2` | tree `GHE-F015-1`, cores `A`/`B` -- unconfirmed, so no peel |
 | `KOR-014-A` + `KOR-014-B` | tree `KOR-014` -- same shape, but nothing confirms a tree `KOR` |
+| `TREE1-A` with a colour `.tif`, `TREE1-B` with no image at all | `TREE1-A` opens even though it is younger -- `has_image` outranks year, and a colour core counts |
+| a real multi-page TIFF saved as `<stem>.tif`, no `_Tv.tif` | `has_image` false, `image_reject` names the page count, `/api/image` 404s |
 
 The folder switch is testable headless apart from the dialog itself: drive
 `POST /api/folder` (and `openFolder(path)` in the page) between two folders and

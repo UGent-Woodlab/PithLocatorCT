@@ -29,7 +29,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
-TOOL_VERSION = "1.1"
+TOOL_VERSION = "1.2"
 SPECIES_TABLE_VERSION = 2
 
 # --------------------------------------------------------------------------
@@ -267,6 +267,124 @@ def read_ringwidth(path):
     return info
 
 
+# --------------------------------------------------------------------------
+# pixel size (microns per pixel)
+#
+# _ringwidth.txt column 3 is the usual source, but it is only as good as
+# RingIndicator's own conversion of the TIFF's XResolution tag, and that
+# conversion has a hole: readTiffTags.m handles ResolutionUnit 1 (none) and
+# 3 (cm), but NOT 2 (inch) -- the ordinary default for a scanner or camera.
+# For unit 2 the raw tag value is used unconverted, so a 1200 dpi scan is
+# recorded as "1200 microns per pixel" in every row. Column 1 (the width
+# itself) is in PIXELS, so this only ever corrupts the millimetre
+# conversion, never the ring geometry.
+#
+# For a flat (rgb/gray) core there is no volume-derived escape hatch the way
+# there is for CT, so column 3 is not trusted there at all -- see
+# resolve_resolution. For CT it is still used, since no image is not the
+# same thing as no resolution: the column 3 value stands, with a warning
+# attached when it looks like a raw tag value rather than a pixel size.
+
+PLAUSIBLE_UM_PX = (0.5, 250.0)
+COMMON_DPI = (72, 96, 150, 200, 240, 300, 400, 600, 720, 1200, 2400, 4800)
+
+
+def read_resolution_txt(folder, stem):
+    """<stem>_resolution.txt, written by RingIndicator's own Resolution menu
+    (interSetTilt.m's set_resolution) or by us -- one number, microns per
+    pixel. Also tried as "<stem>._resolution.txt", the name readTiffTags.m
+    actually produces for a ".tiff" core (it builds the name by chopping the
+    last 4 characters off the filename, not by fileparts)."""
+    for suffix in ("_resolution.txt", "._resolution.txt"):
+        path = os.path.join(folder, stem + suffix)
+        if not os.path.isfile(path):
+            continue
+        arr = _read_numeric_table(path)
+        if arr.size and np.isfinite(arr[0, 0]) and arr[0, 0] > 0:
+            return float(arr[0, 0])
+    return None
+
+
+def write_resolution_txt(folder, stem, res_um):
+    """Write <stem>_resolution.txt in the shape MATLAB's writematrix (and
+    thus RingIndicator's own readmatrix) produces: one number, one line."""
+    path = os.path.join(folder, stem + "_resolution.txt")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write("%.6g\n" % float(res_um))
+    os.replace(tmp, path)
+
+
+def resolve_resolution(folder, stem, image_kind, rw_res_um, probe, override):
+    """Pick the pixel size for one core, and explain the choice.
+
+    Precedence:
+      operator-entered override
+      -> <stem>_resolution.txt
+      -> <stem>_ringwidth.txt column 3 -- NOT for a flat (rgb/gray) core,
+         which has no volume to fall back on if that column is wrong
+      -> none
+
+    Column 3 is never silently replaced by a heuristic guess: a value that
+    looks like a raw DPI or an unconverted cm/inch tag is used exactly as
+    written (when it is the resolved source) and flagged with `warning`,
+    with `suggestions` offered for the operator to confirm, never applied
+    on their own.
+    """
+    sidecar = read_resolution_txt(folder, stem)
+
+    warning = ""
+    suggestions = []
+
+    def add_suggestion(value, why):
+        if value and math.isfinite(value) and value > 0:
+            suggestions.append({"res_um": round(value, 3), "why": why})
+
+    xres = probe.get("xres") if probe else None
+    res_unit = probe.get("res_unit") if probe else None
+
+    if rw_res_um is not None and rw_res_um > 0:
+        if res_unit == 2 and xres and abs(rw_res_um - xres) < 0.01:
+            warning = ("%s_ringwidth.txt says %.4g \u00b5m/px, which is exactly this "
+                       "TIFF's XResolution tag with ResolutionUnit=inch -- "
+                       "RingIndicator left the raw tag value unconverted."
+                       % (stem, rw_res_um))
+            add_suggestion(25400.0 / xres, "25400 / %.4g dpi" % xres)
+        elif not (PLAUSIBLE_UM_PX[0] <= rw_res_um <= PLAUSIBLE_UM_PX[1]):
+            warning = ("%s_ringwidth.txt says %.4g \u00b5m/px, which is outside the "
+                       "plausible range for a core scan." % (stem, rw_res_um))
+            add_suggestion(1.0e4 / rw_res_um, "raw pixels-per-cm tag, unconverted")
+        elif (abs(rw_res_um - round(rw_res_um)) < 1e-6
+                and int(round(rw_res_um)) in COMMON_DPI):
+            warning = ("%s_ringwidth.txt says %.4g \u00b5m/px, which is a common "
+                       "scanner DPI value rather than a pixel size." % (stem, rw_res_um))
+            add_suggestion(25400.0 / rw_res_um, "common scanner DPI")
+
+    if sidecar is not None and rw_res_um is not None and rw_res_um > 0:
+        if abs(sidecar - rw_res_um) / rw_res_um > 0.01:
+            note = ("%s_resolution.txt says %.4g \u00b5m/px but %s_ringwidth.txt "
+                    "says %.4g \u00b5m/px; using the sidecar."
+                    % (stem, sidecar, stem, rw_res_um))
+            warning = (warning + " " + note).strip() if warning else note
+
+    if override is not None:
+        res_um, source = override, "operator entered"
+    elif sidecar is not None:
+        res_um, source = sidecar, "%s_resolution.txt" % stem
+    elif image_kind in ("rgb", "gray"):
+        res_um, source = None, ""
+    elif rw_res_um is not None and rw_res_um > 0:
+        res_um, source = rw_res_um, "%s_ringwidth.txt" % stem
+    else:
+        res_um, source = None, ""
+
+    return {"res_um": res_um, "source": source, "warning": warning,
+            "suggestions": suggestions}
+
+
+# --------------------------------------------------------------------------
+# core image lookup
+
 TV_PATTERNS = ("{s}_Tv.tif", "{s}_Tv.tiff", "{s}_TV.tif", "{s}_tv.tif")
 
 
@@ -277,6 +395,176 @@ def find_transverse(folder, stem):
             return p
     hits = sorted(glob.glob(os.path.join(folder, stem + "*Tv*.tif*")))
     return hits[0] if hits else None
+
+
+# A colour or plain grayscale core scan carries no _Tv.tif -- RingIndicator
+# never writes pre-saved planes for a flat image, only for a real volume it
+# had to average slices out of (see CLAUDE.md). Its image is <stem>.tif
+# itself, but only when that file is actually flat: a multi-page CT volume
+# happening to be named <stem>.tif must never be mistaken for a preview, so
+# every candidate is probed (page count, samples-per-pixel) before it is
+# trusted. No glob here, deliberately: FLAT_PATTERNS matches the stem
+# exactly, or CORE1.tif would match a glob meant for CORE12.tif.
+FLAT_PATTERNS = ("{s}.tif", "{s}.tiff", "{s}.TIF")
+
+_PROBE_CACHE = {}
+_PROBE_CACHE_LOCK = threading.Lock()
+_PROBE_CACHE_MAX = 4096
+
+# Scanner/camera TIFFs commonly carry ResolutionUnit 1 (none) or 3 (cm),
+# which readTiffTags.m converts to microns-per-pixel. Unit 2 (inch) is the
+# one it does NOT convert -- neither branch fires and the raw DPI-ish tag
+# value is used as if it already were microns-per-pixel. We mirror the
+# conversion it DOES do, and deliberately do nothing for unit 2 (see
+# resolve_resolution): guessing 25400/xres there would be exactly the silent
+# substitution this feature exists to avoid.
+def _tiff_resolution_um(tags, path):
+    """(xres, resolution_unit, res_um_or_None) from TIFF tags, mirroring
+    RingIndicator's readTiffTags.m. Never raises."""
+    try:
+        xres_tag = tags.get("XResolution")
+        unit_tag = tags.get("ResolutionUnit")
+        if xres_tag is None or unit_tag is None:
+            return None, None, None
+        xres = xres_tag.value
+        if isinstance(xres, tuple):
+            num, den = xres
+            xres = float(num) / float(den) if den else 0.0
+        else:
+            xres = float(xres)
+        unit = int(unit_tag.value)
+        if not xres:
+            return xres, unit, None
+        if unit == 3:  # cm
+            return xres, unit, round(1.0e4 / xres, 2)
+        if unit == 1:  # "none" -- ImageJ writes real units this way
+            descr = tags.get("ImageDescription")
+            descr = descr.value if descr is not None else ""
+            if "unit=micron" in (descr or ""):
+                return xres, unit, round(1.0 / xres, 2)
+            return xres, unit, round(1.0e4 / xres, 2)
+        # unit == 2 (inch), or anything else: no safe conversion.
+        return xres, unit, None
+    except Exception:
+        return None, None, None
+
+
+def probe_tiff(path):
+    """Inspect a TIFF's shape from its tags alone -- never reads pixel data.
+
+    Returns a dict describing whether the file is FLAT (a single plane, safe
+    to show as a preview) or a volume. Order matters: samples-per-pixel is
+    checked before any second page is touched, and a single-page file is
+    proven single-page by indexing page 1 and catching IndexError rather
+    than by len(tf.pages) or tf.series, both of which walk every IFD -- on a
+    multi-thousand-slice CT volume that is thousands of seeks per probe.
+    Fails closed: any error leaves flat=False, never a false preview.
+    """
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        return {"flat": False, "why": "could not be read (%s)" % exc}
+
+    key = (path, st.st_mtime_ns, st.st_size)
+    with _PROBE_CACHE_LOCK:
+        cached = _PROBE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    info = {"flat": False, "why": "could not be read", "spp": None,
+            "dtype": None, "bits": None, "channels_first": False,
+            "palette": False, "h": None, "w": None,
+            "xres": None, "res_unit": None, "res_um_tag": None}
+    try:
+        with tifffile.TiffFile(path) as tf:
+            page = tf.pages[0]
+            spp = int(getattr(page, "samplesperpixel", 1) or 1)
+            info["spp"] = spp
+            info["dtype"] = str(page.dtype)
+            info["bits"] = int(getattr(page, "bitspersample", 8) or 8)
+            info["palette"] = (int(page.photometric) == 3)
+
+            if spp < 3 and not info["palette"]:
+                # Must prove there is only one plane. An ImageJ contiguous
+                # stack can present as a single IFD with many images baked
+                # into one strip, so check that before indexing page 1.
+                if tf.is_imagej:
+                    n_images = (tf.imagej_metadata or {}).get("images", 1)
+                    if n_images and int(n_images) > 1:
+                        info["why"] = "an ImageJ stack of %d slices" % int(n_images)
+                        _probe_cache_put(key, info)
+                        return info
+                try:
+                    tf.pages[1]
+                except IndexError:
+                    pass
+                else:
+                    info["why"] = "2 or more pages, so this is a volume"
+                    _probe_cache_put(key, info)
+                    return info
+
+            axes = getattr(page, "axes", "") or ""
+            info["channels_first"] = axes.startswith("S")
+            shape = page.shape
+            if info["channels_first"] and len(shape) >= 3:
+                info["h"], info["w"] = int(shape[1]), int(shape[2])
+            else:
+                info["h"], info["w"] = int(shape[0]), int(shape[1])
+
+            xres, unit, res_um = _tiff_resolution_um(page.tags, path)
+            info["xres"], info["res_unit"], info["res_um_tag"] = xres, unit, res_um
+
+            info["flat"] = True
+            info["why"] = ""
+    except Exception as exc:
+        info = {"flat": False, "why": "could not be read (%s)" % exc,
+                 "spp": None, "dtype": None, "bits": None,
+                 "channels_first": False, "palette": False,
+                 "h": None, "w": None,
+                 "xres": None, "res_unit": None, "res_um_tag": None}
+
+    _probe_cache_put(key, info)
+    return info
+
+
+def _probe_cache_put(key, info):
+    with _PROBE_CACHE_LOCK:
+        if len(_PROBE_CACHE) >= _PROBE_CACHE_MAX:
+            _PROBE_CACHE.pop(next(iter(_PROBE_CACHE)))
+        _PROBE_CACHE[key] = info
+
+
+def find_core_image(folder, stem):
+    """Bind a core to the image that previews it.
+
+    Returns a dict {path, kind, file, reject, probe} -- "kind" is one of
+    "ct_tv" (an existing _Tv.tif, unchanged behaviour), "rgb", "gray", or
+    None. "path"/"file" are None when nothing usable was found; "reject"
+    then explains why a candidate file was seen but not used (e.g. it is a
+    volume), so the UI can say something better than "no image found" when
+    the folder plainly contains a TIFF.
+    """
+    tv = find_transverse(folder, stem)
+    if tv is not None:
+        return {"path": tv, "kind": "ct_tv", "file": os.path.basename(tv),
+                "reject": None, "probe": None}
+
+    for pat in FLAT_PATTERNS:
+        p = os.path.join(folder, pat.format(s=stem))
+        if not os.path.isfile(p):
+            continue
+        probe = probe_tiff(p)
+        if not probe["flat"]:
+            return {"path": None, "kind": None, "file": None,
+                    "reject": "%s is not a flat image (%s)"
+                              % (os.path.basename(p), probe["why"]),
+                    "probe": probe}
+        spp = probe["spp"] or 1
+        kind = "rgb" if (spp >= 3 or probe["palette"]) else "gray"
+        return {"path": p, "kind": kind, "file": os.path.basename(p),
+                "reject": None, "probe": probe}
+
+    return {"path": None, "kind": None, "file": None, "reject": None, "probe": None}
 
 
 # --------------------------------------------------------------------------
@@ -430,8 +718,15 @@ def section_number(token):
     return split_token(token)[1]
 
 
-def scan_folder(folder):
-    """Discover cores, read their ring data, group into trees."""
+def scan_folder(folder, res_overrides=None):
+    """Discover cores, read their ring data, group into trees.
+
+    res_overrides: {stem: res_um}, an operator-entered pixel size (see
+    resolve_resolution / POST /api/resolution). Applying it here, in the one
+    place accum_rw_mm is computed, means there is only ever one place that
+    turns pixels into millimetres.
+    """
+    res_overrides = res_overrides or {}
     cores = {}
     for path in sorted(glob.glob(os.path.join(folder, "*_ring_and_fibre.txt"))):
         stem = os.path.basename(path)[: -len("_ring_and_fibre.txt")]
@@ -447,10 +742,12 @@ def scan_folder(folder):
         years = [y for y in rw["years"] if np.isfinite(y)]
         oldest = min(years) if years else None
         newest = max(years) if years else None
-        res_um = rw["res_um"]
         accum_px = float(np.nansum(np.array(rw["widths_px"]))) if rw["widths_px"] else 0.0
 
-        tv = find_transverse(folder, stem)
+        img = find_core_image(folder, stem)
+        resolved = resolve_resolution(folder, stem, img["kind"], rw["res_um"],
+                                       img["probe"], res_overrides.get(stem))
+        res_um = resolved["res_um"]
 
         cores[stem] = {
             "stem": stem,
@@ -459,13 +756,20 @@ def scan_folder(folder):
             "oldest_year": oldest,
             "newest_year": newest,
             "res_um": res_um,
+            "res_source": resolved["source"],
+            "res_warning": resolved["warning"],
+            "res_suggestions": resolved["suggestions"],
             "fell_date": rw["fell_date"],
             "accum_rw_px": accum_px,
             "accum_rw_mm": (accum_px * res_um / 1000.0) if res_um else None,
             "n_missing": rw["n_missing"],
             "n_broken": rw["n_broken"],
-            "has_image": tv is not None,
-            "image_path": tv,
+            "has_image": img["path"] is not None,
+            "image_path": img["path"],
+            "image_kind": img["kind"],
+            "image_file": img["file"],
+            "image_reject": img["reject"],
+            "image_probe": img["probe"],
             "zpos": zpos, "theta": theta, "phi": phi,
             "years": rw["years"],
             "widths_px": rw["widths_px"],
@@ -568,28 +872,112 @@ def select_core(cores, stems):
 # --------------------------------------------------------------------------
 # preview rendering
 
-def render_png(image_path, lo, hi, max_dim=16000):
-    """Transverse preview as 8-bit grayscale PNG, density window [lo, hi]."""
-    with tifffile.TiffFile(image_path) as tf:
-        arr = tf.pages[0].asarray()
-    if arr.ndim == 3:
-        arr = arr[..., 0] if arr.shape[-1] <= 4 else arr[0]
-    arr = arr.astype(np.float32)
+def _pick_scale(arr):
+    """"dtype" for 8-bit/bool data (matches RingIndicator's im2double + a
+    [0,1] display range for a flat image exactly); "auto" for anything wider
+    -- a 16-bit scan windowed by raw dtype range renders as a uniform grey
+    with no way to fix it from the UI, since the CT density controls are
+    hidden for flat images (see CLAUDE.md)."""
+    dt = arr.dtype
+    if dt == np.bool_ or dt == np.uint8 or dt == np.int8:
+        return "dtype"
+    if np.issubdtype(dt, np.floating):
+        finite = arr[np.isfinite(arr)]
+        if finite.size and (finite.min() < -1e-6 or finite.max() > 1.0 + 1e-6):
+            return "auto"
+        return "dtype"
+    return "auto"
 
-    step = 1
-    h, w = arr.shape
-    if max(h, w) > max_dim:
-        step = int(math.ceil(max(h, w) / float(max_dim)))
-        arr = arr[::step, ::step]
 
+def _scale_dtype_range(arr):
+    """Scale to 0..255 by the dtype's own range -- MATLAB im2double's rule."""
+    dt = arr.dtype
+    if dt == np.bool_:
+        return (arr.astype(np.uint8) * 255)
+    if dt == np.uint8:
+        return arr
+    if dt == np.uint16:
+        return (arr >> 8).astype(np.uint8)
+    if dt == np.int8:
+        return (arr.astype(np.int16) + 128).astype(np.uint8)
+    if dt == np.int16:
+        return ((arr.astype(np.int32) + 32768) >> 8).astype(np.uint8)
+    if np.issubdtype(dt, np.floating):
+        return (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+    if np.issubdtype(dt, np.integer):
+        info = np.iinfo(dt)
+        out = (arr.astype(np.float64) - info.min) * (255.0 / (info.max - info.min))
+        np.clip(out, 0, 255, out=out)
+        return out.astype(np.uint8)
+    return arr.astype(np.uint8)
+
+
+def _scale_auto(arr):
+    """2nd/98th percentile stretch on luminance, applied identically to every
+    channel so colour balance is preserved -- the same one-window-for-all-
+    channels idea as the CT density window, just derived from the data
+    instead of typed in."""
+    a = arr.astype(np.float64)
+    lum = a.mean(axis=-1) if a.ndim == 3 else a
+    finite = lum[np.isfinite(lum)]
+    if finite.size:
+        lo, hi = np.percentile(finite, [2, 98])
+    else:
+        lo, hi = 0.0, 1.0
     if hi <= lo:
         hi = lo + 1.0
-    arr = (arr - lo) * (255.0 / (hi - lo))
-    np.clip(arr, 0, 255, out=arr)
-    img = Image.fromarray(arr.astype(np.uint8), mode="L")
+    out = (a - lo) * (255.0 / (hi - lo))
+    np.clip(out, 0, 255, out=out)
+    return out.astype(np.uint8)
+
+
+def render_png(image_path, kind, lo, hi, max_dim=16000, probe=None):
+    """Preview PNG. "ct_tv" is the CT transverse plane, 8-bit grayscale,
+    windowed to the density range [lo, hi] in kg/m3 -- unchanged from before
+    RGB support. "rgb"/"gray" is a flat colour or grayscale core scan with no
+    volume behind it; lo/hi are ignored there, and the pixels are windowed by
+    dtype range or, for anything wider than 8-bit, a percentile stretch (see
+    _scale_auto). Returns (png_bytes, (h, w) BEFORE downsampling, step,
+    scale), where scale is "window" | "dtype" | "auto".
+    """
+    with tifffile.TiffFile(image_path) as tf:
+        page = tf.pages[0]
+        arr = page.asrgb() if (probe and probe.get("palette")) else page.asarray()
+
+    if kind == "ct_tv":
+        if arr.ndim == 3:
+            arr = arr[..., 0] if arr.shape[-1] <= 4 else arr[0]
+        arr = arr.astype(np.float32)
+        step = 1
+        h, w = arr.shape
+        if max(h, w) > max_dim:
+            step = int(math.ceil(max(h, w) / float(max_dim)))
+            arr = arr[::step, ::step]
+        if hi <= lo:
+            hi = lo + 1.0
+        arr = (arr - lo) * (255.0 / (hi - lo))
+        np.clip(arr, 0, 255, out=arr)
+        img = Image.fromarray(arr.astype(np.uint8), mode="L")
+        scale = "window"
+    else:
+        if arr.ndim == 3:
+            if (probe and probe.get("channels_first")
+                    and arr.shape[0] in (3, 4) and arr.shape[-1] not in (3, 4)):
+                arr = np.moveaxis(arr, 0, -1)
+            if arr.shape[-1] >= 4:
+                arr = arr[..., :3]  # drop alpha
+        h, w = arr.shape[0], arr.shape[1]
+        step = 1
+        if max(h, w) > max_dim:
+            step = int(math.ceil(max(h, w) / float(max_dim)))
+            arr = arr[::step, ::step]
+        scale = _pick_scale(arr)
+        out = _scale_dtype_range(arr) if scale == "dtype" else _scale_auto(arr)
+        img = Image.fromarray(out, mode=("RGB" if out.ndim == 3 else "L"))
+
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=False, compress_level=3)
-    return buf.getvalue(), (h, w), step
+    return buf.getvalue(), (h, w), step, scale
 
 
 class PreviewCache(object):
@@ -604,16 +992,19 @@ class PreviewCache(object):
         except OSError:
             self.dir = None
 
-    def get(self, image_path, lo, hi):
+    def get(self, image_path, kind, lo, hi, probe=None):
         st = os.stat(image_path)
+        # lo/hi are a CT density window; meaningless for a flat colour or
+        # grayscale scan, so they must not fragment its one cache entry.
+        lo_k, hi_k = (lo, hi) if kind == "ct_tv" else ("-", "-")
         key = hashlib.sha1(
-            ("%s|%d|%d|%s|%s" % (image_path, st.st_mtime_ns, st.st_size, lo, hi)).encode()
+            ("%s|%d|%d|%s|%s|%s" % (image_path, st.st_mtime_ns, st.st_size, kind, lo_k, hi_k)).encode()
         ).hexdigest()[:20]
         with self.lock:
             if key in self.meta and (self.dir is None or os.path.isfile(self._p(key))):
                 return self._read(key), self.meta[key]
-            data, shape, step = render_png(image_path, lo, hi)
-            info = {"height": shape[0], "width": shape[1], "step": step}
+            data, shape, step, scale = render_png(image_path, kind, lo, hi, probe=probe)
+            info = {"height": shape[0], "width": shape[1], "step": step, "scale": scale}
             self.meta[key] = info
             self._write(key, data)
             return data, info
@@ -669,11 +1060,13 @@ COLUMNS = [
     ("Oldest_Year", "oldest_year"),
     ("Newest_Year", "newest_year"),
     ("PixelSize_um", "res_um"),
+    ("PixelSize_Source", "res_source"),
     ("Pith_X_px", "pith_x_px"),
     ("Pith_Y_px", "pith_y_px"),
     ("InnerRing_zpos_px", "inner_zpos_px"),
     ("InnerRing_theta_rad", "inner_theta"),
     ("Sr_Source", "sr_source"),
+    ("Image_Kind", "image_kind"),
     ("Flag", "flag"),
     ("Notes", "notes"),
     ("Timestamp", "timestamp"),
@@ -774,10 +1167,17 @@ class App(object):
                 save_species(self.folder, self.species)
             except OSError:
                 pass  # a read-only folder is no reason not to run
+        # An operator-entered pixel size is normally persisted by writing
+        # <stem>_resolution.txt, which the next rescan reads straight back --
+        # RingIndicator's own sidecar, so both tools can see it. This dict
+        # only holds a value when that write FAILED (a read-only folder),
+        # so the session keeps working with it in memory. "a read-only
+        # folder is no reason not to run" applies here too.
+        self.res_overrides = {}
         self.rescan()
 
     def rescan(self):
-        self.cores, self.trees = scan_folder(self.folder)
+        self.cores, self.trees = scan_folder(self.folder, self.res_overrides)
 
     def species_names(self):
         return [s["name"] for s in self.species]
@@ -850,6 +1250,7 @@ class App(object):
             siblings.append({
                 "stem": s, "oldest_year": sc["oldest_year"],
                 "n_rings": sc["n_boundaries"], "has_image": sc["has_image"],
+                "image_kind": sc["image_kind"],
                 "accum_rw_mm": sc["accum_rw_mm"], "selected": s == stem,
             })
 
@@ -868,12 +1269,17 @@ class App(object):
             if any(v is not None for v in vals):
                 accum_rw_mm_sum = round(sum(v for v in vals if v is not None), 3)
 
+        image_expected = "%s_Tv.tif or %s.tif" % (stem, stem)
         return {
             "tree": tree_id,
             "stem": stem,
             "rings": rings,
             "res_um": res_um,
             "mm_per_px": mm_per_px,
+            "res_source": c.get("res_source") or "",
+            "res_warning": c.get("res_warning") or "",
+            "res_suggestions": c.get("res_suggestions") or [],
+            "res_editable": c["image_kind"] in ("rgb", "gray") or res_um is None,
             "n_boundaries": c["n_boundaries"],
             "n_widths": c["n_widths"],
             "oldest_year": c["oldest_year"],
@@ -886,6 +1292,11 @@ class App(object):
             "n_missing": c["n_missing"],
             "n_broken": c["n_broken"],
             "has_image": c["has_image"],
+            "image_kind": c["image_kind"],
+            "image_file": c["image_file"],
+            "image_reject": c["image_reject"],
+            "image_expected": image_expected,
+            "supports_window": c["image_kind"] == "ct_tv",
             "siblings": siblings,
             "saved": self.store.rows.get(tree_id),
         }
@@ -1068,6 +1479,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._switch_folder(payload.get("path"))
             if u.path == "/api/folder/pick":
                 return self._pick_folder()
+            if u.path == "/api/resolution":
+                return self._set_resolution(payload)
             if u.path == "/api/species":
                 rows = payload.get("species") or []
                 clean = []
@@ -1128,19 +1541,98 @@ class Handler(BaseHTTPRequestHandler):
     def _image(self, q):
         tree = (q.get("tree") or [""])[0]
         stem = (q.get("stem") or [None])[0]
-        lo = float((q.get("lo") or ["200"])[0])
-        hi = float((q.get("hi") or ["1200"])[0])
         d = self.app.core_detail(tree, stem)
         if d is None:
             return self._err(404, "unknown tree/core")
         core = self.app.cores[d["stem"]]
+        kind = core["image_kind"]
+        # lo/hi are a CT density window and meaningless for a flat colour or
+        # grayscale scan; a stale bookmarked URL with junk in either must not
+        # 500, so parse defensively rather than a bare float().
+        lo = _num((q.get("lo") or [None])[0])
+        hi = _num((q.get("hi") or [None])[0])
+        if lo is None:
+            lo = 200.0
+        if hi is None:
+            hi = 1200.0
         if not core["has_image"]:
-            return self._err(404, "no transverse preview (_Tv.tif) for %s" % d["stem"])
-        data, info = self.app.cache.get(core["image_path"], lo, hi)
+            reason = core.get("image_reject") or (
+                "expected %s" % d.get("image_expected", "%s_Tv.tif or %s.tif" % (d["stem"], d["stem"])))
+            return self._err(404, "no preview image for %s: %s" % (d["stem"], reason))
+        data, info = self.app.cache.get(core["image_path"], kind, lo, hi, probe=core.get("image_probe"))
+        mode = "RGB" if kind in ("rgb",) else "L"
         self._send(200, data, "image/png", {
             "X-Image-Width": str(info["width"]),
             "X-Image-Height": str(info["height"]),
             "X-Image-Step": str(info["step"]),
+            "X-Image-Kind": kind or "",
+            "X-Image-Mode": mode,
+            "X-Image-Scale": info.get("scale") or "",
+        })
+
+    def _set_resolution(self, payload):
+        """POST /api/resolution -- an operator-entered pixel size (microns
+        per pixel) for a core. Persisted by writing <stem>_resolution.txt,
+        the same sidecar RingIndicator's own Resolution menu writes, so a
+        rescan (and RingIndicator, for a TIFF with no resolution tag of its
+        own) picks it straight back up. Applies to every section of the same
+        physical core (see App.section_group) and, with scope="folder", to
+        every other core in the folder that has no trustworthy size of its
+        own yet -- typing the same number for every core of one scanning
+        session is how this feature stops being used.
+        """
+        stem = payload.get("stem")
+        tree = payload.get("tree")
+        if not stem or stem not in self.app.cores:
+            return self._err(404, "unknown core")
+
+        raw = payload.get("res_um")
+        clearing = "res_um" in payload and raw is None
+        res_um = None if clearing else _num(raw)
+        if not clearing and (res_um is None or not (0 < res_um < 10000)):
+            return self._err(400, "pixel size must be a number between 0 and 10000 microns/px")
+
+        stems = set(self.app.section_group(stem))
+        if (payload.get("scope") or "core") == "folder":
+            # Leave a core alone once it has a trustworthy size. A sidecar
+            # or an earlier override is trustworthy even if a leftover
+            # disagreement note against the (already-ignored, or -- for CT
+            # -- superseded) _ringwidth.txt value still shows in res_warning
+            # -- that note is for the operator to see, not a reason to
+            # silently overwrite a value someone already fixed. Only "no
+            # value at all" or "the _ringwidth.txt value itself looks wrong"
+            # (the inch/DPI/magnitude checks, which only ever fire on the
+            # source actually named "..._ringwidth.txt") count as suspect.
+            for s, c in self.app.cores.items():
+                sourced_from_ringwidth = (c["res_source"] or "").endswith("_ringwidth.txt")
+                if c["res_um"] is None or (sourced_from_ringwidth and c["res_warning"]):
+                    stems.add(s)
+
+        warnings = []
+        for s in stems:
+            path = os.path.join(self.app.folder, s + "_resolution.txt")
+            try:
+                if clearing:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                else:
+                    write_resolution_txt(self.app.folder, s, res_um)
+                self.app.res_overrides.pop(s, None)
+            except OSError as exc:
+                if clearing:
+                    warnings.append("could not remove %s (%s)" % (path, exc))
+                else:
+                    self.app.res_overrides[s] = res_um
+                    warnings.append(
+                        "could not write %s_resolution.txt (%s); kept for this session only"
+                        % (s, exc))
+
+        self.app.rescan()
+        tree = tree or self.app.cores[stem]["tree"]
+        d = self.app.core_detail(tree, stem)
+        return self._json({
+            "ok": True, "stems": sorted(stems), "core": d,
+            "warning": "; ".join(warnings) if warnings else None,
         })
 
     def _save_result(self, payload):
@@ -1164,6 +1656,8 @@ class Handler(BaseHTTPRequestHandler):
             "oldest_year": core["oldest_year"],
             "newest_year": core["newest_year"],
             "res_um": core["res_um"],
+            "res_source": core.get("res_source") or "",
+            "image_kind": core.get("image_kind"),
             "accum_ovendry_mm": _round(core["accum_rw_mm"], 3),
             "notes": (payload.get("notes") or "").strip(),
             "timestamp": _dt.datetime.now().isoformat(timespec="seconds"),
@@ -1175,6 +1669,8 @@ class Handler(BaseHTTPRequestHandler):
             row["inner_theta"] = _round(float(core["theta"][0]), 6)
 
         flags = []
+        if core.get("res_warning"):
+            flags.append(core["res_warning"])
         if method == "indicated":
             row["distance_mm"] = 0.0
 
@@ -1212,9 +1708,24 @@ class Handler(BaseHTTPRequestHandler):
             accum_vals = [self.app.cores[s]["accum_rw_mm"] for s in group]
             if not any(v is not None for v in accum_vals):
                 return self._err(
-                    400, "no pixel size in %s_ringwidth.txt, so the accumulated "
-                         "ring width cannot be converted to mm" % d["stem"])
+                    400, "no pixel size for %s (none in _resolution.txt%s, and "
+                         "none entered), so the accumulated ring width cannot "
+                         "be converted to mm"
+                         % (d["stem"], "" if core["image_kind"] in ("rgb", "gray")
+                            else " or _ringwidth.txt"))
             accum = sum(v for v in accum_vals if v is not None)
+
+            # accum_rw_mm_sum adds one value per section, each computed with
+            # THAT section's own resolved pixel size -- if they were scanned
+            # at different resolutions (or one was overridden and another
+            # was not) the sum silently mixes scales. Worth a flag; it would
+            # otherwise be invisible in the saved distance.
+            group_res = [self.app.cores[s]["res_um"] for s in group
+                         if self.app.cores[s]["res_um"]]
+            if len(group_res) > 1 and (max(group_res) - min(group_res)) / min(group_res) > 0.01:
+                flags.append("sections of this core have different pixel sizes (%s)"
+                             % ", ".join("%s=%.3g" % (s, self.app.cores[s]["res_um"])
+                                         for s in group if self.app.cores[s]["res_um"]))
 
             green = accum / (1.0 - sr)
             barkless_r = diam / 2.0 - bark

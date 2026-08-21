@@ -1,14 +1,15 @@
 # PithLocatorCT
 
-Measure the distance to the pith on CT cores.
+Measure the distance to the pith on CT or colour-scanned cores.
 
 A small local web tool for estimating the distance from the innermost indicated
 ring of an increment core to the pith, for cores measured with
-[RingIndicator](https://github.com/UGent-Woodlab/RingIndicator).
+[RingIndicator](https://github.com/UGent-Woodlab/RingIndicator) — a core scanned
+by CT or one photographed/scanned as an ordinary colour or grayscale image.
 
 It reads a folder of RingIndicator output, groups the cores into trees, opens the
 core of each tree that reaches furthest back in time, draws the indication lines
-over the transverse preview, and writes your estimates to `pith_offsets.xlsx` in
+over the preview, and writes your estimates to `pith_offsets.xlsx` in
 that same folder. Nothing leaves the machine: the server binds to `127.0.0.1`
 only.
 
@@ -58,7 +59,15 @@ Per core, named after the core stem:
 |---|---|
 | `<core>_ring_and_fibre.txt` | ring boundary positions and tilt — **required**, this is what makes a core visible to the tool |
 | `<core>_ringwidth.txt` | calendar years, pixel size, accumulated ring width |
-| `<core>_Tv.tif` | the transverse preview, windowed to 200–1200 kg/m³ |
+| `<core>_Tv.tif` | the CT transverse preview, windowed to 200–1200 kg/m³ |
+| `<core>.tif` | a flat colour or grayscale core scan, used when there is no `_Tv.tif` — shown as-is, with no density window. A multi-page TIFF under this name is never used as a preview; RingIndicator itself only opens a genuinely flat file this way |
+| `<core>_resolution.txt` | pixel size in µm/px — RingIndicator's own sidecar, read when present (see [Pixel size](#pixel-size) below) |
+
+A tree whose selected core would otherwise have no image now has one reason more
+to change: **a core with a usable preview always wins over one without**, whatever
+its indicated year — so in a tree mixing a CT core with no `_Tv.tif` and a colour
+core that does have its `.tif`, the colour core opens. Resuming an older, CT-only
+folder is unaffected; this only matters once a colour-scanned core is in the mix.
 
 ## How cores are grouped into trees
 
@@ -128,8 +137,10 @@ switching to another is one click and nothing is ever hidden.
 ## The three cases
 
 1. **Concentric circles** (the default). The core missed the pith. Circles are
-   drawn around the cursor through each of the innermost indicated rings; line
-   the centre up with the ring curvature and click. The saved offset is the
+   drawn around the cursor through each of the innermost indicated rings; a fan
+   of rays through the same point is a second, independent guide, for lining up
+   against the wood rays radiating from the pith. Line the centre up with the
+   ring curvature and click. The saved offset is the
    perpendicular distance from that point to the innermost indicated ring, which
    is the direction in which RingIndicator measures its tilt-corrected ring
    widths. The straight centre-to-centre distance is recorded alongside it.
@@ -152,6 +163,38 @@ switching to another is one click and nothing is ever hidden.
    using only the opened section. The panel shows which files went into the
    number, since measuring just one section of a broken core understates `ΣRW`
    and silently inflates the distance to the pith.
+
+## Pixel size
+
+A CT core's pixel size (µm/px) comes from column 3 of `<core>_ringwidth.txt` —
+that column is written by RingIndicator from the TIFF's own resolution tag, and
+is what `Distance_to_Pith_mm` is measured in.
+
+For a colour or grayscale core that column is not trustworthy on its own: it
+depends on RingIndicator's `readTiffTags.m` converting that tag correctly, and
+that conversion has a gap for `ResolutionUnit=inch` — the ordinary default for a
+scanner or camera — where it leaves the raw tag value unconverted. A 1200 dpi
+scan is then recorded as "1200 µm/px" rather than the true ≈21 µm/px, forty times
+too coarse and silently. So for a colour or grayscale core, column 3 is **never
+used**, and the pixel size comes from, in order:
+
+1. a value you enter for this core (see below);
+2. `<core>_resolution.txt` — RingIndicator's own sidecar, written by its
+   **Resolution** menu when an operator corrects a wrong number there.
+
+If neither exists, the tool asks rather than falls back to the ringwidth column.
+Typing a pixel size in the top-right HUD writes it to that same
+`<core>_resolution.txt`, so RingIndicator can read it back too — though only when
+the TIFF itself carries no resolution tag of its own; a scanner TIFF that does
+carry one still needs correcting from RingIndicator's own Resolution menu as
+well, or the two tools will disagree.
+
+A CT core keeps using column 3 as before — there is no volume behind it to fall
+back to if that number is wrong the way there is for the image — but a value that
+looks like a raw DPI tag or an unconverted cm/inch value is flagged rather than
+used silently, with a suggested correction offered (never applied without
+confirming). `PixelSize_Source` in the output records where each row's number
+actually came from.
 
 ## Species and shrinkage
 
@@ -188,8 +231,12 @@ merge into your metadata. The remaining columns record how the number was
 reached: method, the measured perpendicular and centre-to-centre distances, the
 diameter/bark/Sr inputs, accumulated ring width oven-dry and green,
 `AccumRW_Files` (which section files went into it, when the core has more than
-one), pixel size, the clicked position, and a `Flag` column for results worth a
-second look.
+one), pixel size and `PixelSize_Source` (where it came from — see
+[Pixel size](#pixel-size)), `Image_Kind` (the kind of preview the core used), the
+clicked position, and a `Flag` column for results worth a second look. Column
+*order* is not a stable interface — a new column is added wherever it reads
+best, not always at the end — so anything reading this sheet automatically
+should match on column name.
 
 `pith_offsets.json` holds the same rows and is what the tool reads on startup to
 work out where you left off: restart on the same folder and it reopens at the
@@ -201,7 +248,10 @@ has it open and the write fails, the tool says so and the JSON is still current.
 ## Notes
 
 - `.pith_cache/` next to the data holds the rendered previews. Delete it any
-  time; it is rebuilt on demand.
+  time; it is rebuilt on demand. A colour preview is larger than an 8-bit CT one,
+  so a folder of colour-scanned cores builds a bigger cache.
 - Ring geometry follows `ri.view.RingGeometry` in RingIndicator: a boundary at
   `zpos` with tilt `theta` is the line through `(zpos, (H-1)/2)` with direction
-  `(sin θ, cos θ)`. Distances are measured along its normal.
+  `(sin θ, cos θ)`. Distances are measured along its normal — unchanged for a
+  colour-scanned core, which RingIndicator indicates with the same geometry, just
+  on a colour image rather than a CT plane.

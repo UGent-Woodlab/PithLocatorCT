@@ -75,14 +75,31 @@
             <output id="nCirclesOut">12</output>
           </label>
           <label class="hud-row">
-            <span>density</span>
+            <span>rays</span>
+            <input id="nRays" type="range" min="0" max="36" value="12">
+            <output id="nRaysOut">12</output>
+          </label>
+          <label class="hud-row" id="climRow">
+            <span id="climLabel">density</span>
             <input id="climLo" type="number" step="25" value="200" title="lower limit, kg/m³">
             <input id="climHi" type="number" step="25" value="1200" title="upper limit, kg/m³">
           </label>
           <label class="hud-row hud-checks">
             <span><input id="showRings" type="checkbox" checked> rings</span>
             <span><input id="showLabels" type="checkbox"> years</span>
+            <span><input id="showRays" type="checkbox" checked> rays</span>
           </label>
+          <label class="hud-row" id="pxRow">
+            <span>µm/px</span>
+            <input id="pxSize" type="number" step="0.01" min="0" placeholder="e.g. 21.17" title="pixel size in microns per pixel">
+            <button id="btnPxApply" class="ghost-btn small" title="Set the pixel size for this core">Set</button>
+          </label>
+          <label class="hud-row hud-checks" id="pxFolderRow"
+                 title="Also apply this to every other core in the folder that has no trustworthy pixel size yet.">
+            <span><input id="pxFolder" type="checkbox"> apply to whole folder</span>
+          </label>
+          <div id="pxInfo" class="hud-row hud-note hidden"></div>
+          <div id="pxWarn" class="hud-row hud-note warn hidden"></div>
         </div>
       </div>
 
@@ -127,8 +144,10 @@
           <p class="hint">
             Move the cursor into the wood to the left of the innermost ring. The
             circles are drawn through the innermost indicated rings, so slide the
-            centre until they follow the ring curvature, then <b>click</b> to place
-            the pith. Drag to pan, scroll to zoom.
+            centre until they follow the ring curvature; the rays fanning out from
+            it are a second guide, for lining up against the wood rays radiating
+            from the pith. Then <b>click</b> to place the pith. Drag to pan, scroll
+            to zoom.
           </p>
           <div class="measure-grid">
             <div class="measure"><span>perpendicular</span><b id="mPerp">—</b></div>
@@ -235,10 +254,15 @@
         <b>furthest back in time</b> (lowest indicated year) is opened; on an
         equal oldest year the higher section number wins. Every core of the tree
         is listed beside the tree name, so one click switches to another. It
-        shows the transverse
-        preview <code>&lt;core&gt;_Tv.tif</code>, windowed to 200–1200&nbsp;kg/m³, with the
-        indication lines from <code>&lt;core&gt;_ring_and_fibre.txt</code> drawn on top.
-        Your estimate is written to <code>pith_offsets.xlsx</code> in that same folder.
+        shows the preview image, with the indication lines from
+        <code>&lt;core&gt;_ring_and_fibre.txt</code> drawn on top, and writes your
+        estimate to <code>pith_offsets.xlsx</code> in the same folder. The preview
+        is either a CT transverse plane <code>&lt;core&gt;_Tv.tif</code>, windowed to
+        200–1200&nbsp;kg/m³, or — for a core scanned as an ordinary colour or
+        grayscale image, which RingIndicator opens flat with no <code>_Tv.tif</code>
+        at all — <code>&lt;core&gt;.tif</code> itself, shown as-is with no density
+        window. A multi-page TIFF named <code>&lt;core&gt;.tif</code> is never used as
+        a preview; it is a volume, not a scan of the core's face.
       </p>
       <p>
         To move on to another folder there is no need to restart:
@@ -254,10 +278,12 @@
         <li>
           <b>Concentric circles</b> (default). The core missed the pith. Circles are
           drawn around the cursor through each of the innermost indicated rings.
-          Position the centre so the circles follow the curvature of the real rings
-          and click. The saved offset is the <b>perpendicular</b> distance from that
-          point to the innermost indicated ring — the same direction in which
-          RingIndicator measures its tilt-corrected ring widths.
+          Rays fanning out from the same point are a second, independent guide —
+          line them up with the wood rays radiating from the pith. Position the
+          centre so the circles follow the curvature of the real rings and click.
+          The saved offset is the <b>perpendicular</b> distance from that point to
+          the innermost indicated ring — the same direction in which RingIndicator
+          measures its tilt-corrected ring widths.
         </li>
         <li>
           <b>Pith present and already indicated.</b> The pith is visible on the core
@@ -277,6 +303,23 @@
           shows which files went into the number.
         </li>
       </ol>
+
+      <h3>Pixel size</h3>
+      <p>
+        A CT core's pixel size (µm/px) comes from column 3 of
+        <code>&lt;core&gt;_ringwidth.txt</code>. A colour or grayscale core has no such
+        fallback if that number is wrong, so for those it is <b>not</b> used at
+        all: the pixel size comes only from <code>&lt;core&gt;_resolution.txt</code> —
+        RingIndicator's own sidecar, written by its <b>Resolution</b> menu — or
+        from the field beside the density controls in the top-right HUD. Typing a
+        value there writes that same sidecar file, so RingIndicator picks it up
+        too, though only if the TIFF itself carries no resolution tag —
+        otherwise correct it there as well, from its Resolution menu. A pixel
+        size that looks like a raw scanner DPI or an unconverted tag value (this
+        happens for scans saved with inch-unit resolution, which RingIndicator's
+        reader does not convert) is flagged rather than silently substituted;
+        suggested corrections are offered but never applied without confirming.
+      </p>
 
       <h3>Species and shrinkage</h3>
       <p>
@@ -319,8 +362,13 @@
         it is the one <code>bakker_bai()</code> wants. The rest of the row records how
         that number was reached: the method, the measured perpendicular and
         centre-to-centre distances, the diameter/bark/S<sub>r</sub> inputs, the
-        accumulated ring width both oven-dry and green, the pixel size, the clicked
-        position, and a <code>Flag</code> column for results worth a second look.
+        accumulated ring width both oven-dry and green, the pixel size and where it
+        came from (<code>PixelSize_Source</code>), the kind of preview image used
+        (<code>Image_Kind</code>), the clicked position, and a <code>Flag</code>
+        column for results worth a second look. Column order is not a stable
+        interface — new columns are added where they read best, not always at the
+        end — so anything reading this sheet automatically should match on column
+        <i>name</i>, not position.
       </p>
     </div>
   </div>

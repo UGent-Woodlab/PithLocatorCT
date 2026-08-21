@@ -31,9 +31,14 @@ const S = {
   pith: null,          // {x, y} world, placed
   hover: null,         // {x, y} world, live
   nCircles: 12,
+  nRays: 12,
   showRings: true,
   showLabels: false,
+  showRays: true,
   clim: { lo: 200, hi: 1200 },
+  imageKind: null,      // "ct_tv" | "rgb" | "gray" | null; drives the density HUD
+  supportsWindow: false,
+  imageScale: '',       // "window" | "dtype" | "auto", from X-Image-Scale
   diamMode: 'diameter',
   loading: false,
 };
@@ -133,12 +138,17 @@ function clearFolderState() {
   S.imgW = 0; S.imgH = 0; S.step = 1; S.mmPerWorld = null;
   S.lastSpecies = null;
   S.onlyOpenedSection = false;
+  S.imageKind = null; S.supportsWindow = false;
+  applyImageKindUI();
   $('onlyOpenedSection').checked = false;
   $('treeName').textContent = '—';
   $('coreChips').innerHTML = '';
   $('coreFacts').innerHTML = '';
   $('notes').value = '';
   $('bark').value = ''; $('diameter').value = ''; $('outerGap').value = '0';
+  $('pxSize').value = ''; $('pxFolder').checked = false;
+  $('pxRow').classList.add('hidden'); $('pxFolderRow').classList.add('hidden');
+  hidePxNotes();
   $('offscreenHint').classList.add('hidden');
   hideStageMessage();
   setDiamMode('diameter');
@@ -198,15 +208,21 @@ async function loadCore(tree, stem) {
   S.core = await r.json();
 
   $('treeName').textContent = S.core.tree;
+  S.imageKind = S.core.image_kind;
+  S.supportsWindow = !!S.core.supports_window;
+  applyImageKindUI();
   renderChips();
   renderFacts();
   applySaved(S.core.saved);
+  updatePxControl();
 
   if (!S.core.has_image) {
     hideStageMessage();
-    showStageMessage('No transverse preview for <b>' + S.core.stem + '</b>. ' +
-      'Expected <b>' + S.core.stem + '_Tv.tif</b> beside the indication files. ' +
-      'You can still use case 3 (diameter &amp; bark).');
+    const why = S.core.image_reject
+      ? esc(S.core.image_reject)
+      : 'Expected <b>' + esc(S.core.image_expected) + '</b> beside the indication files.';
+    showStageMessage('No preview image for <b>' + esc(S.core.stem) + '</b>. ' + why +
+      ' You can still use case 3 (diameter &amp; bark).');
     S.imgW = 0; S.imgH = 0;
     S.mmPerWorld = S.core.mm_per_px;
     S.loading = false;
@@ -224,18 +240,33 @@ async function loadCore(tree, stem) {
   draw();
 }
 
+/** The density window is a CT concept (kg/m3); hide it entirely for a flat
+ *  colour or grayscale scan rather than leave a control up that means
+ *  nothing for the image on screen. */
+function applyImageKindUI() {
+  $('climRow').classList.toggle('hidden', !S.supportsWindow);
+}
+
 async function loadImage() {
-  const u = '/api/image?tree=' + encodeURIComponent(S.core.tree) +
-            '&stem=' + encodeURIComponent(S.core.stem) +
-            '&lo=' + S.clim.lo + '&hi=' + S.clim.hi;
+  let u = '/api/image?tree=' + encodeURIComponent(S.core.tree) +
+          '&stem=' + encodeURIComponent(S.core.stem);
+  if (S.supportsWindow) u += '&lo=' + S.clim.lo + '&hi=' + S.clim.hi;
   const r = await fetch(u);
   if (!r.ok) throw new Error('preview could not be rendered');
   S.step = parseFloat(r.headers.get('X-Image-Step') || '1') || 1;
+  S.imageScale = r.headers.get('X-Image-Scale') || '';
   const blob = await r.blob();
   S.bitmap = await createImageBitmap(blob);
   S.imgW = S.bitmap.width;
   S.imgH = S.bitmap.height;
   S.mmPerWorld = S.core.mm_per_px ? S.core.mm_per_px * S.step : null;
+  if (S.imageScale === 'auto') {
+    const facts = $('coreFacts');
+    if (facts && facts.innerHTML.indexOf('auto-scaled') < 0) {
+      facts.innerHTML += ' · <span class="pill" title="wider than 8-bit, so the ' +
+        'preview is contrast-stretched rather than shown at its raw dtype range">auto-scaled</span>';
+    }
+  }
 }
 
 function renderChips() {
@@ -253,7 +284,7 @@ function renderChips() {
     b.title = s.selected
       ? 'Open core — chosen automatically because it reaches furthest back'
       : 'Use this core instead';
-    if (!s.has_image) b.title += ' (no transverse preview)';
+    if (!s.has_image) b.title += ' (no preview image)';
     b.onclick = () => { if (!s.selected) loadCore(S.core.tree, s.stem); };
     box.appendChild(b);
   });
@@ -266,10 +297,104 @@ function renderFacts() {
   if (c.oldest_year !== null) bits.push('oldest <b>' + c.oldest_year + '</b>');
   if (c.accum_rw_mm !== null) bits.push('ΣRW <b>' + fmt(c.accum_rw_mm, 1) + '</b> mm');
   if (c.sections) bits.push('<b>' + c.sections.length + '</b> sections of this core');
-  bits.push(c.res_um ? '<b>' + fmt(c.res_um, 2) + '</b> µm/px' : '<b>no pixel size</b>');
+  bits.push(c.res_um
+    ? '<b>' + fmt(c.res_um, 2) + '</b> µm/px' + (c.res_source ? ' <small>(' + esc(c.res_source) + ')</small>' : '')
+    : '<b>no pixel size</b>');
+  if (c.res_warning) {
+    bits.push('<span class="pill warn" id="factsResWarn" title="' + esc(c.res_warning) +
+               '">check pixel size</span>');
+  }
+  if (c.image_kind === 'rgb') bits.push('colour image');
   if (c.n_missing) bits.push(c.n_missing + ' missing');
   if (c.n_broken) bits.push(c.n_broken + ' fractures');
   $('coreFacts').innerHTML = bits.join(' · ');
+  const warnPill = $('factsResWarn');
+  if (warnPill) warnPill.onclick = () => { $('pxSize').focus(); };
+}
+
+/* ------------------------------------------------------------ pixel size */
+
+/** The override field only shows when there is something for it to fix: a
+ *  flat (colour/grayscale) core, which has no ringwidth-column fallback, or
+ *  a CT core that has no pixel size at all. A CT core with an ordinary
+ *  _ringwidth.txt value keeps no override control, same as before this
+ *  feature existed. */
+function updatePxControl() {
+  const c = S.core;
+  const editable = !!(c && c.res_editable);
+  $('pxRow').classList.toggle('hidden', !editable);
+  $('pxFolderRow').classList.toggle('hidden', !editable);
+  if (!c) { hidePxNotes(); return; }
+  $('pxSize').value = c.res_um != null ? c.res_um : '';
+  renderPxNotes(c);
+}
+
+function hidePxNotes() {
+  const info = $('pxInfo'), warn = $('pxWarn');
+  info.classList.add('hidden'); info.innerHTML = '';
+  warn.classList.add('hidden'); warn.innerHTML = '';
+}
+
+function renderPxNotes(c) {
+  hidePxNotes();
+  if (c.res_source) {
+    const info = $('pxInfo');
+    info.classList.remove('hidden');
+    info.textContent = 'source: ' + c.res_source;
+  }
+  if (c.res_warning) {
+    const box = $('pxWarn');
+    box.classList.remove('hidden');
+    box.innerHTML = esc(c.res_warning);
+    (c.res_suggestions || []).forEach((s) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ghost-btn small sugg-btn';
+      btn.textContent = fmt(s.res_um, 2) + ' µm/px — ' + s.why;
+      // Only fills the field -- the operator still has to press Set, so a
+      // number is never applied without being seen and confirmed.
+      btn.onclick = () => { $('pxSize').value = s.res_um; $('pxSize').focus(); };
+      box.appendChild(btn);
+    });
+  }
+}
+
+/** POST /api/resolution and refresh in place -- no image reload, since the
+ *  pixel size does not change the PNG, and refetching would discard the
+ *  view and any placed pith. */
+async function applyPixelSize() {
+  if (!S.core) return;
+  const raw = $('pxSize').value.trim();
+  const res_um = raw === '' ? null : parseFloat(raw);
+  if (raw !== '' && (!isFinite(res_um) || res_um <= 0)) {
+    return toast('Enter a positive pixel size in microns/px.', 'err');
+  }
+  const scope = $('pxFolder').checked ? 'folder' : 'core';
+  let j;
+  try {
+    const r = await fetch('/api/resolution', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stem: S.core.stem, tree: S.core.tree, res_um, scope }),
+    });
+    j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'the server refused the pixel size');
+  } catch (e) {
+    return toast('Not set: ' + e.message, 'err', 6000);
+  }
+  S.core = j.core;
+  // Mirror loadCore's two cases: with a preview loaded, mm/world includes
+  // the downsample step; with none (case 3 only), mm_per_px applies as-is.
+  S.mmPerWorld = S.bitmap
+    ? (S.core.mm_per_px ? S.core.mm_per_px * S.step : null)
+    : S.core.mm_per_px;
+  renderFacts();
+  updatePxControl();
+  updateGeoWork();
+  updateSave();
+  draw();
+  if (j.warning) toast(j.warning, 'warn', 7000);
+  else toast(res_um === null ? 'Pixel size cleared'
+             : 'Pixel size set' + (j.stems.length > 1 ? ' for ' + j.stems.length + ' cores' : ''));
 }
 
 /* --------------------------------------------------------- saved results */
@@ -529,6 +654,31 @@ function drawEstimate() {
   const cx = w2sx(p.x), cy = w2sy(p.y), k = S.view.k;
 
   ctx.save();
+
+  // Alignment rays, drawn first so the circles read on top of them: a second,
+  // independent cue for lining the candidate centre up with the wood rays
+  // that radiate from the real pith. Ray 0 points along the same normal as
+  // the dashed perpendicular drawn below, so the two overlays stay coherent.
+  if (S.showRays && S.nRays > 0 && S.core.rings.length) {
+    let maxR = 40;   // floor so the fan stays visible even zoomed far out
+    for (let i = 0; i < nC; i++) {
+      const r = Math.abs(signedTo(i, p)) * k;
+      if (r >= 1 && r <= 40000) maxR = Math.max(maxR, r);
+    }
+    const gap = 10;  // leave the centre cross below uncluttered
+    const a0 = -S.core.rings[0].theta;
+    ctx.strokeStyle = 'rgba(76,201,240,.22)';
+    ctx.lineWidth = 1;
+    for (let j = 0; j < S.nRays; j++) {
+      const a = a0 + (2 * Math.PI * j) / S.nRays;
+      const dx = Math.cos(a), dy = Math.sin(a);
+      ctx.beginPath();
+      ctx.moveTo(cx + dx * gap, cy + dy * gap);
+      ctx.lineTo(cx + dx * maxR, cy + dy * maxR);
+      ctx.stroke();
+    }
+  }
+
   // concentric circles, one through each of the innermost boundaries
   for (let i = 0; i < nC; i++) {
     const r = Math.abs(signedTo(i, p)) * k;
@@ -620,7 +770,7 @@ function updateHud() {
   if (!m || m.perp_mm === null) {
     rv.textContent = '— mm';
     rs.textContent = S.mmPerWorld ? 'move the cursor into the wood'
-                                  : 'no pixel size in _ringwidth.txt';
+                                  : 'no pixel size — enter µm/px in the HUD';
     setMeasures(null);
     return;
   }
@@ -681,7 +831,7 @@ function computeGeometric() {
   const accum = acc.value;
 
   if (accum === null || accum === undefined)
-    return { ok: false, why: 'no pixel size, so ΣRW cannot be converted to mm' };
+    return { ok: false, why: 'no pixel size — enter µm/px in the HUD to convert ΣRW to mm' };
   if (!isFinite(sr) || sr < 0 || sr >= 0.5)
     return { ok: false,
              why: $('species').value ? 'set a radial shrinkage'
@@ -995,13 +1145,22 @@ function wireUI() {
     $('nCirclesOut').value = S.nCircles;
     draw();
   });
+  $('nRays').addEventListener('input', (e) => {
+    S.nRays = parseInt(e.target.value, 10);
+    $('nRaysOut').value = S.nRays;
+    draw();
+  });
   $('showRings').addEventListener('change', (e) => { S.showRings = e.target.checked; draw(); });
   $('showLabels').addEventListener('change', (e) => { S.showLabels = e.target.checked; draw(); });
+  $('showRays').addEventListener('change', (e) => { S.showRays = e.target.checked; draw(); });
+  $('btnPxApply').onclick = applyPixelSize;
+  $('pxSize').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyPixelSize(); } });
 
   let climTimer = null;
   const climChanged = () => {
     clearTimeout(climTimer);
     climTimer = setTimeout(async () => {
+      if (!S.supportsWindow) return;
       const lo = parseFloat($('climLo').value), hi = parseFloat($('climHi').value);
       if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
       S.clim = { lo, hi };
