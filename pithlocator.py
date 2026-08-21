@@ -1162,11 +1162,6 @@ class App(object):
         self.cache = PreviewCache(self.folder)
         self.store = ResultStore(self.folder)
         self.species = load_species(self.folder)
-        if not os.path.isfile(species_csv_path(self.folder)):
-            try:
-                save_species(self.folder, self.species)
-            except OSError:
-                pass  # a read-only folder is no reason not to run
         # An operator-entered pixel size is normally persisted by writing
         # <stem>_resolution.txt, which the next rescan reads straight back --
         # RingIndicator's own sidecar, so both tools can see it. This dict
