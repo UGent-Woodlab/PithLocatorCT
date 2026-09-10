@@ -139,10 +139,19 @@ These are the things that look wrong and are not, or that break silently.
    RingIndicator averages. A rejected file's reason travels as `image_reject`
    all the way to the UI, so a folder that visibly contains a TIFF doesn't just
    say "no image" with no explanation. `render_png` never applies the CT
-   density window to a flat image (`kind != "ct_tv"`): it scales by dtype range,
-   or, for anything wider than 8-bit, a percentile stretch — the CT window
-   controls are hidden client-side (`supports_window`) rather than repurposed,
-   and `kind` is part of the preview cache key so a reclassified file can never
+   density window to a flat image (`kind != "ct_tv"`): it applies an
+   `AUTO_PCT_LO`/`AUTO_PCT_HI` (0.5/99.5) percentile stretch — always for
+   colour, and for grayscale wider than 8-bit — and otherwise scales by dtype
+   range (`_pick_scale`). The percentiles are pooled over **all channels**, not
+   taken from the luminance: a brown core is roughly `150/115/85`, channels
+   further apart than any one channel's own spread, so a luminance window is
+   narrower than the gap between them and would saturate red while crushing
+   blue. The CT window controls are hidden client-side (`supports_window`) and
+   the `#pctRow` percentile boxes take their place for a stretched image
+   (client-side, on `X-Image-Scale == "auto"`, so they never appear over an
+   8-bit grayscale scan they could not affect); the operator's percentiles
+   persist across cores like the CT window does (`S.pctSeeded`). `kind` and the
+   percentiles are part of the preview cache key so a reclassified file can never
    serve a stale render.
 
 12. **A flat core's pixel size never comes from `_ringwidth.txt` column 3.**

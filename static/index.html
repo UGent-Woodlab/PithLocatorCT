@@ -84,6 +84,13 @@
             <input id="climLo" type="number" step="25" value="200" title="lower limit, kg/m³">
             <input id="climHi" type="number" step="25" value="1200" title="upper limit, kg/m³">
           </label>
+          <label class="hud-row hidden" id="pctRow">
+            <span id="pctLabel">stretch</span>
+            <input id="pctLo" type="number" step="0.1" min="0" max="100" value="0.5"
+                   title="lower percentile of the contrast stretch">
+            <input id="pctHi" type="number" step="0.1" min="0" max="100" value="99.5"
+                   title="upper percentile of the contrast stretch">
+          </label>
           <label class="hud-row hud-checks">
             <span><input id="showRings" type="checkbox" checked> rings</span>
             <span><input id="showLabels" type="checkbox"> years</span>
@@ -260,9 +267,17 @@
         is either a CT transverse plane <code>&lt;core&gt;_Tv.tif</code>, windowed to
         200–1200&nbsp;kg/m³, or — for a core scanned as an ordinary colour or
         grayscale image, which RingIndicator opens flat with no <code>_Tv.tif</code>
-        at all — <code>&lt;core&gt;.tif</code> itself, shown as-is with no density
-        window. A multi-page TIFF named <code>&lt;core&gt;.tif</code> is never used as
-        a preview; it is a volume, not a scan of the core's face.
+        at all — <code>&lt;core&gt;.tif</code> itself. A colour scan has no density
+        window; instead its contrast is <b>stretched automatically</b>, by
+        default between the 0.5th and 99.5th percentile of its brightness, since
+        wood fills only a narrow part of the available range and looks washed
+        out shown raw. Both ends are in the <b>stretch</b> box in the HUD, in
+        the place the density window occupies for a CT core, and a value typed
+        there holds for the cores that follow. A grayscale scan wider than
+        8&nbsp;bits is stretched the same way; a plain 8-bit one is shown at its
+        own range, as RingIndicator shows it. A multi-page TIFF named
+        <code>&lt;core&gt;.tif</code> is never used as a preview; it is a volume,
+        not a scan of the core's face.
       </p>
       <p>
         To move on to another folder there is no need to restart:
@@ -311,7 +326,7 @@
         fallback if that number is wrong, so for those it is <b>not</b> used at
         all: the pixel size comes only from <code>&lt;core&gt;_resolution.txt</code> —
         RingIndicator's own sidecar, written by its <b>Resolution</b> menu — or
-        from the field beside the density controls in the top-right HUD. Typing a
+        from the field beside the display controls in the top-right HUD. Typing a
         value there writes that same sidecar file, so RingIndicator picks it up
         too, though only if the TIFF itself carries no resolution tag —
         otherwise correct it there as well, from its Resolution menu. A pixel

@@ -60,7 +60,7 @@ Per core, named after the core stem:
 | `<core>_ring_and_fibre.txt` | ring boundary positions and tilt — **required**, this is what makes a core visible to the tool |
 | `<core>_ringwidth.txt` | calendar years, pixel size, accumulated ring width |
 | `<core>_Tv.tif` | the CT transverse preview, windowed to 200–1200 kg/m³ |
-| `<core>.tif` | a flat colour or grayscale core scan, used when there is no `_Tv.tif` — shown as-is, with no density window. A multi-page TIFF under this name is never used as a preview; RingIndicator itself only opens a genuinely flat file this way |
+| `<core>.tif` | a flat colour or grayscale core scan, used when there is no `_Tv.tif` — no density window; a colour scan is contrast-stretched automatically (0.5–99.5 percentile by default, adjustable in the HUD's **stretch** box), a grayscale one only when it is wider than 8-bit. A multi-page TIFF under this name is never used as a preview; RingIndicator itself only opens a genuinely flat file this way |
 | `<core>_resolution.txt` | pixel size in µm/px — RingIndicator's own sidecar, read when present (see [Pixel size](#pixel-size) below) |
 
 A tree whose selected core would otherwise have no image now has one reason more

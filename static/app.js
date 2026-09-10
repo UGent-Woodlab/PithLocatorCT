@@ -36,6 +36,8 @@ const S = {
   showLabels: false,
   showRays: true,
   clim: { lo: 200, hi: 1200 },
+  pct: { lo: 0.5, hi: 99.5 },   // percentile stretch of a flat colour/gray scan
+  pctSeeded: false,     // the server's default has been read once; keep edits after
   imageKind: null,      // "ct_tv" | "rgb" | "gray" | null; drives the density HUD
   supportsWindow: false,
   imageScale: '',       // "window" | "dtype" | "auto", from X-Image-Scale
@@ -242,15 +244,34 @@ async function loadCore(tree, stem) {
 
 /** The density window is a CT concept (kg/m3); hide it entirely for a flat
  *  colour or grayscale scan rather than leave a control up that means
- *  nothing for the image on screen. */
+ *  nothing for the image on screen. The percentile stretch is the flat-scan
+ *  counterpart, and is shown only once the render has actually come back
+ *  auto-scaled (X-Image-Scale) -- an 8-bit grayscale scan is shown at its
+ *  dtype range, where the percentiles would do nothing. */
 function applyImageKindUI() {
   $('climRow').classList.toggle('hidden', !S.supportsWindow);
+  showStretchRow(false);
+  // The server owns the default percentiles, but only as a starting point:
+  // an operator who widens the stretch for one scan of a session wants it
+  // to hold for the next core too, the same way the CT window does.
+  const d = S.core && S.core.stretch_pct;
+  if (!S.pctSeeded && d && d.length === 2 && isFinite(d[0]) && isFinite(d[1])) {
+    S.pct = { lo: d[0], hi: d[1] };
+    S.pctSeeded = true;
+  }
+  $('pctLo').value = S.pct.lo;
+  $('pctHi').value = S.pct.hi;
+}
+
+function showStretchRow(on) {
+  $('pctRow').classList.toggle('hidden', !on);
 }
 
 async function loadImage() {
   let u = '/api/image?tree=' + encodeURIComponent(S.core.tree) +
           '&stem=' + encodeURIComponent(S.core.stem);
   if (S.supportsWindow) u += '&lo=' + S.clim.lo + '&hi=' + S.clim.hi;
+  else u += '&plo=' + S.pct.lo + '&phi=' + S.pct.hi;
   const r = await fetch(u);
   if (!r.ok) throw new Error('preview could not be rendered');
   S.step = parseFloat(r.headers.get('X-Image-Step') || '1') || 1;
@@ -260,11 +281,12 @@ async function loadImage() {
   S.imgW = S.bitmap.width;
   S.imgH = S.bitmap.height;
   S.mmPerWorld = S.core.mm_per_px ? S.core.mm_per_px * S.step : null;
+  showStretchRow(S.imageScale === 'auto');
   if (S.imageScale === 'auto') {
     const facts = $('coreFacts');
     if (facts && facts.innerHTML.indexOf('auto-scaled') < 0) {
-      facts.innerHTML += ' · <span class="pill" title="wider than 8-bit, so the ' +
-        'preview is contrast-stretched rather than shown at its raw dtype range">auto-scaled</span>';
+      facts.innerHTML += ' · <span class="pill" title="the preview is contrast-stretched ' +
+        'to the percentile range in the stretch box, not shown at its raw dtype range">auto-scaled</span>';
     }
   }
 }
@@ -1171,6 +1193,22 @@ function wireUI() {
   };
   $('climLo').addEventListener('input', climChanged);
   $('climHi').addEventListener('input', climChanged);
+
+  let pctTimer = null;
+  const pctChanged = () => {
+    clearTimeout(pctTimer);
+    pctTimer = setTimeout(async () => {
+      if (S.supportsWindow) return;
+      const lo = parseFloat($('pctLo').value), hi = parseFloat($('pctHi').value);
+      if (!isFinite(lo) || !isFinite(hi) || lo < 0 || hi > 100 || hi <= lo) return;
+      S.pct = { lo, hi };
+      if (!S.core || !S.core.has_image) return;
+      try { await loadImage(); draw(); }
+      catch (err) { toast('Could not re-render the preview: ' + err.message, 'err'); }
+    }, 350);
+  };
+  $('pctLo').addEventListener('input', pctChanged);
+  $('pctHi').addEventListener('input', pctChanged);
 
   $('btnZoomIn').onclick = () => zoomAt(S.cssW / 2, S.cssH / 2, 1.35);
   $('btnZoomOut').onclick = () => zoomAt(S.cssW / 2, S.cssH / 2, 1 / 1.35);

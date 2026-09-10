@@ -285,6 +285,15 @@ def read_ringwidth(path):
 # same thing as no resolution: the column 3 value stands, with a warning
 # attached when it looks like a raw tag value rather than a pixel size.
 
+# Default percentile window for the contrast stretch of a flat scan. A
+# colour core scan almost never fills the full 0..255 range -- wood is a
+# narrow band of browns -- so shown at its raw dtype range it looks washed
+# out. Clipping half a percent off each tail restores the contrast without
+# throwing away anything a person is looking at; the operator can change
+# both ends from the HUD.
+AUTO_PCT_LO = 0.5
+AUTO_PCT_HI = 99.5
+
 PLAUSIBLE_UM_PX = (0.5, 250.0)
 COMMON_DPI = (72, 96, 150, 200, 240, 300, 400, 600, 720, 1200, 2400, 4800)
 
@@ -873,12 +882,16 @@ def select_core(cores, stems):
 # preview rendering
 
 def _pick_scale(arr):
-    """"dtype" for 8-bit/bool data (matches RingIndicator's im2double + a
-    [0,1] display range for a flat image exactly); "auto" for anything wider
-    -- a 16-bit scan windowed by raw dtype range renders as a uniform grey
-    with no way to fix it from the UI, since the CT density controls are
-    hidden for flat images (see CLAUDE.md)."""
+    """"auto" for every colour image, whatever its dtype: an RGB core scan
+    occupies a narrow slice of the available range, so the raw dtype range
+    is a low-contrast render of a picture the operator has to read ring
+    boundaries off. Grayscale keeps the older rule -- "dtype" for 8-bit/bool
+    data (matching RingIndicator's im2double + a [0,1] display range for a
+    flat image exactly), "auto" for anything wider, since a 16-bit scan
+    windowed by raw dtype range renders as a uniform grey."""
     dt = arr.dtype
+    if arr.ndim == 3:
+        return "auto"
     if dt == np.bool_ or dt == np.uint8 or dt == np.int8:
         return "dtype"
     if np.issubdtype(dt, np.floating):
@@ -912,32 +925,54 @@ def _scale_dtype_range(arr):
     return arr.astype(np.uint8)
 
 
-def _scale_auto(arr):
-    """2nd/98th percentile stretch on luminance, applied identically to every
-    channel so colour balance is preserved -- the same one-window-for-all-
-    channels idea as the CT density window, just derived from the data
-    instead of typed in."""
-    a = arr.astype(np.float64)
-    lum = a.mean(axis=-1) if a.ndim == 3 else a
-    finite = lum[np.isfinite(lum)]
-    if finite.size:
-        lo, hi = np.percentile(finite, [2, 98])
+def _scale_auto(arr, plo=AUTO_PCT_LO, phi=AUTO_PCT_HI):
+    """Percentile stretch, one window applied identically to every channel so
+    colour balance is preserved -- the same one-window-for-all-channels idea
+    as the CT density window, just derived from the data instead of typed in.
+    [plo, phi] are percentiles, defaulting to AUTO_PCT_LO/AUTO_PCT_HI.
+
+    The percentiles are taken over ALL channel values pooled, never over the
+    luminance: on wood the channels sit far apart (a brown core is ~150/115/
+    85) while each channel's own spread is a fraction of that, so a window
+    cut from the luminance is narrower than the gap between channels and
+    saturates red to white while crushing blue to black -- a stretch that
+    destroys the hue it is meant to preserve. Pooled, the window spans what
+    the image actually contains, and every channel keeps its offset inside
+    it.
+
+    Every colour preview comes through here, including the 8-bit scans that
+    used to take the dtype-range path, so it stays cheap on a 100-megapixel
+    flatbed scan: the percentiles come from a sample of rows (a full-width
+    row every few rows describes a core's value distribution as well as all
+    of them do) and the scaling runs in float32, which is ample for an
+    8-bit result."""
+    src = arr
+    if src.shape[0] > 2048:
+        src = src[:: src.shape[0] // 1024]
+    if np.issubdtype(src.dtype, np.floating):
+        src = src[np.isfinite(src)]
+    if src.size:
+        lo, hi = np.percentile(src, [plo, phi])
     else:
         lo, hi = 0.0, 1.0
     if hi <= lo:
         hi = lo + 1.0
-    out = (a - lo) * (255.0 / (hi - lo))
+    out = arr.astype(np.float32)
+    out -= np.float32(lo)
+    out *= np.float32(255.0 / (hi - lo))
     np.clip(out, 0, 255, out=out)
     return out.astype(np.uint8)
 
 
-def render_png(image_path, kind, lo, hi, max_dim=16000, probe=None):
+def render_png(image_path, kind, lo, hi, max_dim=16000, probe=None,
+               plo=AUTO_PCT_LO, phi=AUTO_PCT_HI):
     """Preview PNG. "ct_tv" is the CT transverse plane, 8-bit grayscale,
     windowed to the density range [lo, hi] in kg/m3 -- unchanged from before
     RGB support. "rgb"/"gray" is a flat colour or grayscale core scan with no
     volume behind it; lo/hi are ignored there, and the pixels are windowed by
-    dtype range or, for anything wider than 8-bit, a percentile stretch (see
-    _scale_auto). Returns (png_bytes, (h, w) BEFORE downsampling, step,
+    a [plo, phi] percentile stretch -- always for colour, and for grayscale
+    wider than 8-bit (see _pick_scale / _scale_auto) -- or otherwise by
+    dtype range. Returns (png_bytes, (h, w) BEFORE downsampling, step,
     scale), where scale is "window" | "dtype" | "auto".
     """
     with tifffile.TiffFile(image_path) as tf:
@@ -972,7 +1007,8 @@ def render_png(image_path, kind, lo, hi, max_dim=16000, probe=None):
             step = int(math.ceil(max(h, w) / float(max_dim)))
             arr = arr[::step, ::step]
         scale = _pick_scale(arr)
-        out = _scale_dtype_range(arr) if scale == "dtype" else _scale_auto(arr)
+        out = (_scale_dtype_range(arr) if scale == "dtype"
+               else _scale_auto(arr, plo, phi))
         img = Image.fromarray(out, mode=("RGB" if out.ndim == 3 else "L"))
 
     buf = io.BytesIO()
@@ -992,18 +1028,25 @@ class PreviewCache(object):
         except OSError:
             self.dir = None
 
-    def get(self, image_path, kind, lo, hi, probe=None):
+    def get(self, image_path, kind, lo, hi, probe=None,
+            plo=AUTO_PCT_LO, phi=AUTO_PCT_HI):
         st = os.stat(image_path)
-        # lo/hi are a CT density window; meaningless for a flat colour or
-        # grayscale scan, so they must not fragment its one cache entry.
-        lo_k, hi_k = (lo, hi) if kind == "ct_tv" else ("-", "-")
+        # lo/hi are a CT density window and plo/phi a stretch of a flat
+        # scan; each is meaningless for the other kind, so neither must
+        # fragment the other's cache entries.
+        ct = (kind == "ct_tv")
+        lo_k, hi_k = (lo, hi) if ct else ("-", "-")
+        plo_k, phi_k = ("-", "-") if ct else (plo, phi)
         key = hashlib.sha1(
-            ("%s|%d|%d|%s|%s|%s" % (image_path, st.st_mtime_ns, st.st_size, kind, lo_k, hi_k)).encode()
+            ("%s|%d|%d|%s|%s|%s|%s|%s"
+             % (image_path, st.st_mtime_ns, st.st_size, kind,
+                lo_k, hi_k, plo_k, phi_k)).encode()
         ).hexdigest()[:20]
         with self.lock:
             if key in self.meta and (self.dir is None or os.path.isfile(self._p(key))):
                 return self._read(key), self.meta[key]
-            data, shape, step, scale = render_png(image_path, kind, lo, hi, probe=probe)
+            data, shape, step, scale = render_png(image_path, kind, lo, hi,
+                                                  probe=probe, plo=plo, phi=phi)
             info = {"height": shape[0], "width": shape[1], "step": step, "scale": scale}
             self.meta[key] = info
             self._write(key, data)
@@ -1292,6 +1335,7 @@ class App(object):
             "image_reject": c["image_reject"],
             "image_expected": image_expected,
             "supports_window": c["image_kind"] == "ct_tv",
+            "stretch_pct": [AUTO_PCT_LO, AUTO_PCT_HI],
             "siblings": siblings,
             "saved": self.store.rows.get(tree_id),
         }
@@ -1542,19 +1586,28 @@ class Handler(BaseHTTPRequestHandler):
         core = self.app.cores[d["stem"]]
         kind = core["image_kind"]
         # lo/hi are a CT density window and meaningless for a flat colour or
-        # grayscale scan; a stale bookmarked URL with junk in either must not
-        # 500, so parse defensively rather than a bare float().
+        # grayscale scan; plo/phi are the percentile stretch of a flat scan
+        # and meaningless for CT. A stale bookmarked URL with junk in any of
+        # them must not 500, so parse defensively rather than a bare
+        # float(), and fall back to the default whenever the pair does not
+        # describe a usable window.
         lo = _num((q.get("lo") or [None])[0])
         hi = _num((q.get("hi") or [None])[0])
         if lo is None:
             lo = 200.0
         if hi is None:
             hi = 1200.0
+        plo = _num((q.get("plo") or [None])[0])
+        phi = _num((q.get("phi") or [None])[0])
+        if (plo is None or phi is None or not 0.0 <= plo < phi <= 100.0):
+            plo, phi = AUTO_PCT_LO, AUTO_PCT_HI
         if not core["has_image"]:
             reason = core.get("image_reject") or (
                 "expected %s" % d.get("image_expected", "%s_Tv.tif or %s.tif" % (d["stem"], d["stem"])))
             return self._err(404, "no preview image for %s: %s" % (d["stem"], reason))
-        data, info = self.app.cache.get(core["image_path"], kind, lo, hi, probe=core.get("image_probe"))
+        data, info = self.app.cache.get(core["image_path"], kind, lo, hi,
+                                        probe=core.get("image_probe"),
+                                        plo=plo, phi=phi)
         mode = "RGB" if kind in ("rgb",) else "L"
         self._send(200, data, "image/png", {
             "X-Image-Width": str(info["width"]),
@@ -1563,6 +1616,8 @@ class Handler(BaseHTTPRequestHandler):
             "X-Image-Kind": kind or "",
             "X-Image-Mode": mode,
             "X-Image-Scale": info.get("scale") or "",
+            "X-Image-Stretch": ("%g,%g" % (plo, phi)
+                                if info.get("scale") == "auto" else ""),
         })
 
     def _set_resolution(self, payload):
