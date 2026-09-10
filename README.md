@@ -63,6 +63,10 @@ Per core, named after the core stem:
 | `<core>.tif` | a flat colour or grayscale core scan, used when there is no `_Tv.tif` — no density window; a colour scan is contrast-stretched automatically (0.5–99.5 percentile by default, adjustable in the HUD's **stretch** box), a grayscale one only when it is wider than 8-bit. A multi-page TIFF under this name is never used as a preview; RingIndicator itself only opens a genuinely flat file this way |
 | `<core>_resolution.txt` | pixel size in µm/px — RingIndicator's own sidecar, read when present (see [Pixel size](#pixel-size) below) |
 
+The tool writes `pith_offsets.xlsx`, `pith_offsets.json` and — only once you
+correct a grouping — `pith_grouping.json` into the same folder, and caches
+rendered previews in `.pith_cache/`.
+
 A tree whose selected core would otherwise have no image now has one reason more
 to change: **a core with a usable preview always wins over one without**, whatever
 its indicated year — so in a tree mixing a CT core with no `_Tv.tif` and a colour
@@ -133,6 +137,42 @@ have one.
 
 Every core of the tree is listed beside the tree name with its oldest year, so
 switching to another is one click and nothing is ever hidden.
+
+### When the grouping is wrong
+
+All of the above is a guess about someone else's file names, and it is sometimes
+wrong: a site code that ends in a letter and was never a tree, a folder that
+mixes two naming habits, a sample filed under the wrong tree. **Grouping…**,
+beside the tree name, corrects it for the tree that is open:
+
+| what you want | how |
+|---|---|
+| this sample belongs to another tree | pick that tree in the core's **Belongs to** box |
+| this sample is its own tree | **a tree of its own** |
+| these cores are not one tree at all | **Not one tree — split them all** — every core of the tree gets its own |
+| a tree that is not in the list yet | **a new tree — type the name…** |
+| undo one core | **back to the file names** |
+| undo the whole folder | **Undo all corrections** |
+
+The unit that moves is a **core**, not a file: the sections of one broken core
+are pieces of one sample and travel together. A core moved into another tree
+never merges with a core already there that happens to share its letter — the
+sections of a physical core are tracked by where it came from, not by its name in
+its new tree.
+
+The same editor holds a folder-wide switch, **Measure every sample on its own**,
+which turns the tree logic off entirely: every `_ring_and_fibre.txt` file becomes
+its own item with its own row in the spreadsheet, **sections of a broken core
+included** — so case 3 then uses that one file's ΣRW rather than the sum of its
+sections. Use it when a folder is a pile of samples rather than a set of trees.
+
+Corrections are remembered per folder in `pith_grouping.json`, so they survive a
+restart and travel with the data. **Results already saved follow their core**
+wherever it is moved — nothing has to be measured again. If a change puts two
+already-measured cores in one tree, the sheet keeps one row per tree: the result
+for the core the tree now opens stands, and the other is **set aside** in
+`pith_offsets.json` rather than deleted — undo the change and it comes straight
+back.
 
 ## The three cases
 
@@ -226,9 +266,13 @@ of.
 
 ## Output
 
-`pith_offsets.xlsx` — one row per tree. `Distance_to_Pith_mm` is the column to
-merge into your metadata. The remaining columns record how the number was
-reached: method, the measured perpendicular and centre-to-centre distances, the
+`pith_offsets.xlsx` — one row per tree, or one row per sample in per-sample mode
+(see [When the grouping is wrong](#when-the-grouping-is-wrong)).
+`Distance_to_Pith_mm` is the column to merge into your metadata. The remaining
+columns record how the number was reached: `TreeID_Source` (whether the row's
+tree came from the file names, `auto`; from a correction you made, `manual`; or
+from per-sample mode), method, the measured perpendicular and centre-to-centre
+distances, the
 diameter/bark/Sr inputs, accumulated ring width oven-dry and green,
 `AccumRW_Files` (which section files went into it, when the core has more than
 one), pixel size and `PixelSize_Source` (where it came from — see
@@ -237,6 +281,10 @@ clicked position, and a `Flag` column for results worth a second look. Column
 *order* is not a stable interface — a new column is added wherever it reads
 best, not always at the end — so anything reading this sheet automatically
 should match on column name.
+
+A `retired` list in `pith_offsets.json` holds any result set aside by a
+regrouping that merged two measured cores into one tree. Those rows are kept out
+of the sheet and come back on their own if the change is undone.
 
 `pith_offsets.json` holds the same rows and is what the tool reads on startup to
 work out where you left off: restart on the same folder and it reopens at the

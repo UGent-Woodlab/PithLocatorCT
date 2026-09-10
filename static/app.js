@@ -45,6 +45,18 @@ const S = {
   loading: false,
 };
 
+/** How this folder is grouped, from /api/session. "per-sample" means the tree
+ *  logic is off and every core file is its own item. */
+function groupMode() {
+  return (S.session && S.session.grouping && S.session.grouping.mode) || 'auto';
+}
+function perSample() { return groupMode() === 'per-sample'; }
+/** What one item in the list is called, which is not always a tree. */
+function itemWord(n) {
+  const w = perSample() ? 'sample' : 'tree';
+  return n === 1 ? w : w + 's';
+}
+
 const canvas = $('canvas');
 const ctx = canvas.getContext('2d');
 
@@ -80,6 +92,8 @@ async function loadSession(rescan) {
   buildSpeciesSelect();
   renderTreeList();
   renderProgress();
+  const gw = S.session.grouping && S.session.grouping.warning;
+  if (gw && gw !== S.lastGroupWarning) { S.lastGroupWarning = gw; toast(gw, 'warn', 9000); }
 }
 
 /* ----------------------------------------------------------- the folder */
@@ -127,7 +141,8 @@ async function openFolder(path) {
   await loadSession(false);
   await startSession();
   toast(S.trees.length
-    ? 'Opened ' + $('folderPath').textContent + ' — ' + S.trees.length + ' trees'
+    ? 'Opened ' + $('folderPath').textContent + ' — ' + S.trees.length + ' ' +
+      itemWord(S.trees.length)
     : 'Opened, but no cores were found there', S.trees.length ? '' : 'warn', 4500);
 }
 
@@ -139,7 +154,9 @@ function clearFolderState() {
   S.core = null; S.pith = null; S.hover = null; S.bitmap = null;
   S.imgW = 0; S.imgH = 0; S.step = 1; S.mmPerWorld = null;
   S.lastSpecies = null;
+  S.lastGroupWarning = null;
   S.onlyOpenedSection = false;
+  $('treeSource').classList.add('hidden');
   S.imageKind = null; S.supportsWindow = false;
   applyImageKindUI();
   $('onlyOpenedSection').checked = false;
@@ -174,12 +191,17 @@ function renderTreeList() {
     li.querySelector('.val').textContent = t.done
       ? fmt(t.result.distance_mm, 1) + ' mm'
       : (t.has_image ? '' : 'no image');
-    li.title = t.cores.join('  ·  ') + (t.done ? '\nsaved: ' + t.result.method : '');
+    li.title = t.cores.join('  ·  ') +
+      (t.source === 'manual' ? '\ngrouped by hand' : '') +
+      (t.source === 'per-sample' ? '\nmeasured as its own sample' : '') +
+      (t.done ? '\nsaved: ' + t.result.method : '');
     li.onclick = () => { if (isNarrow()) $('sidebar').classList.add('hidden'); goto(i); };
     ul.appendChild(li);
   });
   const n = S.trees.length, d = S.trees.filter((t) => t.done).length;
-  $('sideSummary').textContent = n + ' trees · ' + d + ' done · ' + (n - d) + ' to go';
+  $('sideSummary').textContent = n + ' ' + itemWord(n) + ' · ' + d + ' done · ' +
+                                 (n - d) + ' to go';
+  $('treeFilter').placeholder = 'Filter ' + itemWord(2) + '…';
 }
 
 function renderProgress() {
@@ -210,6 +232,7 @@ async function loadCore(tree, stem) {
   S.core = await r.json();
 
   $('treeName').textContent = S.core.tree;
+  renderTreeSource();
   S.imageKind = S.core.image_kind;
   S.supportsWindow = !!S.core.supports_window;
   applyImageKindUI();
@@ -289,6 +312,24 @@ async function loadImage() {
         'to the percentile range in the stretch box, not shown at its raw dtype range">auto-scaled</span>';
     }
   }
+}
+
+/** A tree grouped by hand, or a lone sample, says so beside its name: the
+ *  grouping is the one thing on screen that came from neither the file names
+ *  nor the image, so it should not be invisible while measuring. */
+function renderTreeSource() {
+  const el = $('treeSource');
+  const src = S.core && S.core.tree_source;
+  const label = src === 'manual' ? 'grouped by hand'
+              : src === 'per-sample' ? 'single sample' : '';
+  el.textContent = label;
+  el.title = src === 'manual'
+    ? 'This tree was set by hand; the file names would have said ' +
+      (S.core.auto_tree || '—') + '. Grouping… to change it.'
+    : src === 'per-sample'
+      ? 'Every sample in this folder is measured on its own — the tree logic is off.'
+      : '';
+  el.classList.toggle('hidden', !label);
 }
 
 function renderChips() {
@@ -970,6 +1011,122 @@ function renderSpeciesTable() {
   });
 }
 
+/* -------------------------------------------------------------- grouping */
+
+function openGrouping() {
+  if (!S.core) return toast('Open a core first.', 'warn');
+  $('modeAuto').checked = !perSample();
+  $('modePerSample').checked = perSample();
+  renderGrouping();
+  openModal('groupModal');
+}
+
+/** The current tree's cores, each with somewhere else to go. One row per
+ *  physical core, not per file: sections are pieces of one sample and move
+ *  together. */
+function renderGrouping() {
+  const box = $('groupTreeBox');
+  box.classList.toggle('hidden', perSample());
+  $('groupTreeName').textContent = S.core ? S.core.tree : '—';
+  const t = $('groupTable');
+  t.innerHTML = '<tr><th>Core</th><th>Belongs to</th></tr>';
+  const groups = (S.core && S.core.core_groups) || [];
+  groups.forEach((g) => {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.className = 'group-table-core';
+    td.appendChild(document.createTextNode(g.label));
+    const sm = document.createElement('small');
+    sm.textContent = g.stems.length > 1
+      ? g.stems.length + ' sections: ' + g.stems.join(' + ')
+      : g.stems[0];
+    td.appendChild(sm);
+    tr.appendChild(td);
+
+    const cell = document.createElement('td');
+    const sel = document.createElement('select');
+    const add = (value, text) => {
+      const o = document.createElement('option');
+      o.value = value; o.textContent = text; sel.appendChild(o);
+    };
+    add('', S.core.tree + '  (where it is now)');
+    S.trees.forEach((x) => { if (x.tree !== S.core.tree) add('move:' + x.tree, x.tree); });
+    add('detach', 'a tree of its own');
+    if (g.source !== 'auto' && g.auto_tree !== S.core.tree) {
+      add('auto', 'back to the file names  (' + g.auto_tree + ')');
+    }
+    add('new', 'a new tree — type the name…');
+    sel.onchange = () => applyGrouping(sel.value, g);
+    cell.appendChild(sel);
+    tr.appendChild(cell);
+    t.appendChild(tr);
+  });
+
+  const n = (S.session.grouping && S.session.grouping.n_assigned) || 0;
+  const retired = (S.session.grouping && S.session.grouping.n_retired) || 0;
+  $('btnResetGrouping').disabled = !n && !perSample();
+  $('groupState').innerHTML = (n
+      ? '<b>' + n + '</b> core file' + (n === 1 ? '' : 's') + ' grouped by hand in this folder.'
+      : 'Nothing corrected in this folder yet — the file names decide.') +
+    (retired ? ' <b>' + retired + '</b> saved result' + (retired === 1 ? '' : 's') +
+               ' set aside by an earlier merge, kept in pith_offsets.json and ' +
+               'brought back if you undo it.' : '');
+}
+
+/** Send one change and rebuild the session around it. */
+async function postGrouping(body, what) {
+  const stem = S.core && S.core.stem;
+  let d = {};
+  try {
+    const r = await fetch('/api/grouping', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'the server refused that change');
+  } catch (e) {
+    return toast('Not changed: ' + e.message, 'err', 7000);
+  }
+  await loadSession(false);
+  // Stay with the core that was open, wherever it has just ended up.
+  let i = S.trees.findIndex((t) => t.cores.indexOf(stem) >= 0);
+  if (i < 0) i = clamp(S.index, 0, S.trees.length - 1);
+  await goto(i);
+  if (!$('groupModal').classList.contains('hidden')) renderGrouping();
+
+  const rep = d.report || {};
+  const bits = [what];
+  if (rep.moved) bits.push(rep.moved + ' saved result' + (rep.moved === 1 ? '' : 's') + ' moved along');
+  if (rep.revived) bits.push(rep.revived + ' brought back');
+  if (rep.retired && rep.retired.length) {
+    bits.push(rep.retired.length + ' set aside (' +
+      rep.retired.map((r) => r.core).join(', ') + ') — kept in pith_offsets.json');
+  }
+  toast(bits.join(' · '), rep.warning ? 'warn' : '', rep.warning ? 9000 : 5000);
+  if (rep.warning) toast(rep.warning, 'warn', 9000);
+}
+
+function applyGrouping(value, g) {
+  const stem = g.stems[0];
+  if (!value) return;
+  if (value === 'detach') {
+    return postGrouping({ detach: [stem] }, g.label + ' is its own tree now');
+  }
+  if (value === 'auto') {
+    const assign = {}; assign[stem] = '';
+    return postGrouping({ assign: assign }, g.label + ' follows the file names again');
+  }
+  if (value === 'new') {
+    const name = (prompt('Name of the tree ' + g.label + ' belongs to:', S.core.tree) || '').trim();
+    if (!name) return renderGrouping();
+    const assign = {}; assign[stem] = name;
+    return postGrouping({ assign: assign }, g.label + ' → ' + name);
+  }
+  const target = value.slice('move:'.length);
+  const assign = {}; assign[stem] = target;
+  return postGrouping({ assign: assign }, g.label + ' → ' + target);
+}
+
 async function saveSpeciesTable() {
   const rows = [...$('speciesTable').querySelectorAll('tr')].slice(1).map((tr) => ({
     name: tr.querySelector('.nm').value.trim(),
@@ -1054,7 +1211,8 @@ async function save(advance) {
   if (advance) {
     if (S.index < S.trees.length - 1) await goto(S.index + 1);
     else { updateSave(); toast('That was the last tree. ' +
-      S.trees.filter((x) => x.done).length + ' of ' + S.trees.length + ' done.', 'warn', 6000); }
+      S.trees.filter((x) => x.done).length + ' of ' + S.trees.length + ' ' +
+      itemWord(S.trees.length) + ' done.', 'warn', 6000); }
   } else updateSave();
 }
 
@@ -1250,6 +1408,19 @@ function wireUI() {
   $('folderPath').onclick = changeFolder;
   $('btnFolder').onclick = changeFolder;
   $('btnManual').onclick = () => openModal('manualModal');
+  $('btnGroup').onclick = openGrouping;
+  $('btnSplitTree').onclick = () => {
+    const tree = S.core && S.core.tree;
+    const n = ((S.core && S.core.core_groups) || []).length;
+    if (!tree || n < 2) return toast('This tree holds one core — nothing to split.', 'warn');
+    postGrouping({ split: tree }, tree + ' split into ' + n + ' trees');
+  };
+  $('btnResetGrouping').onclick = () => {
+    postGrouping({ reset: true }, 'Grouping back to the file names');
+  };
+  $('modeAuto').onchange = () => postGrouping({ mode: 'auto' }, 'Cores grouped into trees again');
+  $('modePerSample').onchange = () =>
+    postGrouping({ mode: 'per-sample' }, 'Every sample on its own');
   $('btnSpecies').onclick = () => { renderSpeciesTable(); openModal('speciesModal'); };
   $('btnAddSpecies').onclick = () => {
     S.session.species.push({ name: '', sr: 0.05, source: 'user supplied' });

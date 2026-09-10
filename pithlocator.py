@@ -727,13 +727,16 @@ def section_number(token):
     return split_token(token)[1]
 
 
-def scan_folder(folder, res_overrides=None):
+def scan_folder(folder, res_overrides=None, grouping=None):
     """Discover cores, read their ring data, group into trees.
 
     res_overrides: {stem: res_um}, an operator-entered pixel size (see
     resolve_resolution / POST /api/resolution). Applying it here, in the one
     place accum_rw_mm is computed, means there is only ever one place that
     turns pixels into millimetres.
+
+    grouping: the operator's grouping (see load_grouping), applied on top of
+    the automatic one so the rest of the tool only ever reads c["tree"].
     """
     res_overrides = res_overrides or {}
     cores = {}
@@ -788,8 +791,20 @@ def scan_folder(folder, res_overrides=None):
     # structural convention is only accepted when some OTHER stem confirms it
     # (see resolve_stem_names), which cannot be decided one file at a time.
     for stem, (tree, token) in resolve_stem_names(list(cores)).items():
-        cores[stem]["tree"] = tree
-        cores[stem]["core_token"] = token
+        c = cores[stem]
+        c["auto_tree"] = tree
+        c["core_token"] = token
+        c["tree"] = tree
+        c["tree_source"] = "auto"
+        # The identity of the PHYSICAL core -- what its sections share, and
+        # what section_group keys off. It is deliberately built from the
+        # AUTOMATIC tree: cores move between trees when the operator regroups,
+        # and two cores that happen to share a core letter must not start
+        # looking like sections of each other because they were moved into the
+        # same tree.
+        cid = core_id(token)
+        c["core_key"] = "%s\u0000%s" % (tree, cid or stem)
+    apply_grouping(cores, grouping)
 
     trees = {}
     for stem, c in cores.items():
@@ -842,6 +857,178 @@ def resolve_stem_names(stems):
                 continue
         resolved[stem] = (tree, token)
     return resolved
+
+
+# --------------------------------------------------------------------------
+# the operator's grouping
+#
+# The conventions above are guesses about someone else's file names, and they
+# are sometimes wrong: a site code that ends in a letter, a folder that mixes
+# two naming habits, a sample that was filed under the wrong tree. So the
+# automatic answer can be overridden, per folder, and the override is what the
+# tool uses from then on:
+#
+#   mode "auto"        the naming conventions decide, adjusted by "assign"
+#   mode "per-sample"  no tree logic at all -- every _ring_and_fibre.txt file
+#                      is its own item, measured and saved on its own
+#   assign             {stem: tree id}; the named stem's whole physical core
+#                      (all of its sections) moves to that tree
+#
+# It lives in pith_grouping.json beside the data, so it survives a restart and
+# travels with the folder. It is versioned like the species table: a file from
+# a newer build is left alone rather than half-read, because a grouping that is
+# silently different from what the operator set is worse than none.
+GROUPING_JSON = "pith_grouping.json"
+GROUPING_VERSION = 1
+GROUPING_MODES = ("auto", "per-sample")
+MAX_TREE_ID = 120
+
+
+def load_grouping(folder):
+    """Read pith_grouping.json. Always returns a usable dict; a "warning" key
+    explains anything that was ignored, for the UI to show."""
+    g = {"mode": "auto", "assign": {}}
+    path = os.path.join(folder, GROUPING_JSON)
+    if not os.path.isfile(path):
+        return g
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        g["warning"] = "%s could not be read (%s); the automatic grouping is in use." % (
+            GROUPING_JSON, exc)
+        sys.stderr.write(g["warning"] + "\n")
+        return g
+    if not isinstance(data, dict):
+        g["warning"] = "%s is not a grouping file; the automatic grouping is in use." % GROUPING_JSON
+        return g
+    version = data.get("version")
+    if isinstance(version, int) and version > GROUPING_VERSION:
+        g["warning"] = ("%s was written by a newer version of this tool (v%d); it is being "
+                        "left alone and the automatic grouping is in use." % (GROUPING_JSON, version))
+        sys.stderr.write(g["warning"] + "\n")
+        return g
+    if data.get("mode") in GROUPING_MODES:
+        g["mode"] = data["mode"]
+    assign = data.get("assign")
+    if isinstance(assign, dict):
+        for stem, tree in assign.items():
+            tree = clean_tree_id(tree)
+            if isinstance(stem, str) and stem and tree:
+                g["assign"][stem] = tree
+    return g
+
+
+def clean_tree_id(tree):
+    """A tree id an operator typed, or "" if it is not usable as one. Tree ids
+    end up as spreadsheet cells and as keys of the result store, so newlines
+    and tabs are out and the length is capped."""
+    if not isinstance(tree, str):
+        return ""
+    tree = " ".join(tree.split()).strip()
+    return tree[:MAX_TREE_ID]
+
+
+def save_grouping(folder, g, keep_existing=False):
+    """Persist the grouping; returns a message if it could not be written. A
+    read-only folder is no reason not to run, so the caller keeps the grouping
+    in memory and reports this rather than failing the change.
+
+    keep_existing is set when the file already there could not be used (it came
+    from a newer build, or it is not readable): it is moved to
+    pith_grouping.old.json rather than overwritten, the same way an outdated
+    species table is set aside instead of deleted. The operator's change has to
+    persist, but not by destroying something this build did not understand.
+    """
+    path = os.path.join(folder, GROUPING_JSON)
+    note = ""
+    if keep_existing and os.path.isfile(path):
+        old = os.path.join(folder, GROUPING_JSON.replace(".json", ".old.json"))
+        try:
+            os.replace(path, old)
+            note = " The grouping file that was there is now %s." % os.path.basename(old)
+        except OSError as exc:
+            return ("Could not set aside the existing %s (%s), so it was left as it is "
+                    "and your change applies to this session only." % (GROUPING_JSON, exc))
+    mode = g.get("mode", "auto")
+    assign = {k: v for k, v in sorted((g.get("assign") or {}).items())}
+    if mode == "auto" and not assign:
+        # Nothing left to remember: take the file away rather than leave an
+        # empty one behind, so "no file" keeps meaning "nothing overridden".
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            return "Could not remove %s (%s); it will be read again next time." % (
+                GROUPING_JSON, exc)
+        return note.strip() or None
+    payload = {"version": GROUPING_VERSION, "mode": mode, "assign": assign,
+               "written": _dt.datetime.now().isoformat(timespec="seconds")}
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=1)
+        os.replace(tmp, path)
+    except OSError as exc:
+        return "Could not write %s (%s); the grouping applies to this session only." % (
+            GROUPING_JSON, exc)
+    return note.strip() or None
+
+
+def core_label(stems):
+    """A name for the physical core made of these section files: their common
+    prefix (KOR-014-A2 + KOR-014-A3 -> KOR-014-A), or the stem itself when the
+    core is one file."""
+    stems = sorted(stems)
+    if len(stems) == 1:
+        return stems[0]
+    prefix = os.path.commonprefix(stems).rstrip("-_")
+    return prefix or stems[0]
+
+
+def unique_tree_id(label, taken):
+    """label, or the first "label (2)", "label (3)"... that is free. Splitting
+    a tree must not accidentally name a core after a tree that already exists,
+    which would merge them instead of separating them."""
+    if label not in taken:
+        return label
+    for n in range(2, 100):
+        cand = "%s (%d)" % (label, n)
+        if cand not in taken:
+            return cand
+    return label
+
+
+def apply_grouping(cores, grouping):
+    """Overlay the operator's grouping (see above) on the automatic one, in
+    place. Every core keeps its "auto_tree" so the override can always be
+    undone, and gains a "tree_source" saying which decided its tree."""
+    mode = (grouping or {}).get("mode", "auto")
+    if mode == "per-sample":
+        for stem, c in cores.items():
+            c["tree"] = stem
+            c["tree_source"] = "per-sample"
+            # Every file is its own sample here, sections included -- that is
+            # what ignoring the tree logic means -- so no two cores share a
+            # section group.
+            c["core_key"] = "per-sample\u0000" + stem
+        return
+    assign = (grouping or {}).get("assign") or {}
+    if not assign:
+        return
+    by_key = {}
+    for stem, c in cores.items():
+        by_key.setdefault(c["core_key"], []).append(stem)
+    for stem, tree in assign.items():
+        c = cores.get(stem)
+        if c is None:
+            continue
+        # An entry names one stem but moves the whole physical core: sections
+        # are pieces of one sample and cannot sit in two different trees.
+        for s in by_key.get(c["core_key"], [stem]):
+            cores[s]["tree"] = tree
+            cores[s]["tree_source"] = "manual"
 
 
 def read_ringwidth_empty():
@@ -1083,6 +1270,7 @@ RESULT_XLSX = "pith_offsets.xlsx"
 
 COLUMNS = [
     ("TreeID", "tree"),
+    ("TreeID_Source", "tree_source"),
     ("Core", "core"),
     ("OtherCores", "other_cores"),
     ("Species", "species"),
@@ -1130,6 +1318,12 @@ class ResultStore(object):
         self.xlsx_path = os.path.join(folder, RESULT_XLSX)
         self.lock = threading.Lock()
         self.rows = {}
+        # Results that a regrouping left with no tree of their own to sit in
+        # (two measured cores in one tree, and the sheet is one row per tree).
+        # Kept here, in the JSON but out of the sheet, so undoing the
+        # regrouping brings the measurement back instead of asking for it
+        # again. See regroup().
+        self.retired = []
         self._load()
 
     def _load(self):
@@ -1141,6 +1335,9 @@ class ResultStore(object):
             for r in data.get("results", []):
                 if r.get("tree"):
                     self.rows[r["tree"]] = r
+            for r in data.get("retired", []):
+                if isinstance(r, dict) and r.get("core"):
+                    self.retired.append(r)
         except (OSError, ValueError) as exc:
             sys.stderr.write("Could not read %s (%s); starting a new result set.\n"
                              % (self.json_path, exc))
@@ -1148,9 +1345,79 @@ class ResultStore(object):
     def save(self, row):
         with self.lock:
             self.rows[row["tree"]] = row
+            # A freshly measured core supersedes any retired result for the
+            # same core: the new number is the one that stands.
+            self.retired = [r for r in self.retired if r.get("core") != row.get("core")]
             self._write_json()
             err = self._write_xlsx()
         return err
+
+    def regroup(self, stem_tree, selected, tree_cores, tree_source):
+        """Move saved results to whatever tree their measured core now belongs
+        to, after the operator changed the grouping.
+
+        Rows are keyed by tree and the sheet is one row per tree, so a change
+        that puts two measured cores in one tree leaves one row too many: the
+        result for the core the tree now opens stands, the others are retired
+        (see self.retired). Retired results are reconsidered on every
+        regrouping, so undoing one brings its measurement straight back.
+
+        A result whose core is no longer in the folder is left where it is --
+        the file may come back, and dropping a measurement because a scan was
+        moved away would be worse than a row that is momentarily orphaned.
+        """
+        with self.lock:
+            before = {t: r.get("core") for t, r in self.rows.items()}
+            pool = list(self.rows.values()) + list(self.retired)
+            orphans, by_tree = [], {}
+            for row in pool:
+                tree = stem_tree.get(row.get("core"))
+                if tree is None:
+                    orphans.append(row)
+                else:
+                    by_tree.setdefault(tree, []).append(row)
+
+            active, retired = {}, []
+            for tree, rows in by_tree.items():
+                # The core the tree now opens wins, so the "done" mark in the
+                # list and the row in the sheet describe the same measurement;
+                # between others the most recent one wins. Two stable sorts,
+                # newest first and then the selected core to the front.
+                rows.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
+                rows.sort(key=lambda r: r.get("core") != selected.get(tree))
+                keep = dict(rows[0])
+                keep["tree"] = tree
+                keep["tree_source"] = tree_source.get(keep.get("core"), "auto")
+                keep["other_cores"] = ", ".join(
+                    s for s in tree_cores.get(tree, []) if s != keep.get("core"))
+                active[tree] = keep
+                for r in rows[1:]:
+                    r = dict(r)
+                    r["tree"] = tree
+                    r["tree_source"] = tree_source.get(r.get("core"), "auto")
+                    retired.append(r)
+            for row in orphans:
+                if row.get("tree") in active:
+                    retired.append(row)
+                else:
+                    active[row["tree"]] = row
+
+            self.rows, self.retired = active, retired
+            self._write_json()
+            err = self._write_xlsx()
+
+        after = {r.get("core"): t for t, r in self.rows.items()}
+        moved = sum(1 for tree, core in before.items()
+                    if core is not None and after.get(core) not in (None, tree))
+        revived = sum(1 for core in after
+                      if core is not None and core not in before.values())
+        return {
+            "moved": moved,
+            "revived": revived,
+            "retired": [{"core": r.get("core"), "tree": r.get("tree"),
+                         "distance_mm": r.get("distance_mm")} for r in retired],
+            "error": err,
+        }
 
     def delete(self, tree):
         with self.lock:
@@ -1163,6 +1430,9 @@ class ResultStore(object):
         payload = {"tool_version": TOOL_VERSION,
                    "written": _dt.datetime.now().isoformat(timespec="seconds"),
                    "results": [self.rows[k] for k in sorted(self.rows)]}
+        if self.retired:
+            payload["retired"] = sorted(
+                self.retired, key=lambda r: (r.get("tree") or "", r.get("core") or ""))
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=1)
         os.replace(tmp, self.json_path)
@@ -1212,10 +1482,14 @@ class App(object):
         # so the session keeps working with it in memory. "a read-only
         # folder is no reason not to run" applies here too.
         self.res_overrides = {}
+        # How the folder's cores are grouped into trees: the naming
+        # conventions, plus whatever the operator has overridden.
+        self.grouping = load_grouping(self.folder)
         self.rescan()
 
     def rescan(self):
-        self.cores, self.trees = scan_folder(self.folder, self.res_overrides)
+        self.cores, self.trees = scan_folder(self.folder, self.res_overrides,
+                                             self.grouping)
 
     def species_names(self):
         return [s["name"] for s in self.species]
@@ -1228,14 +1502,120 @@ class App(object):
         c = self.cores.get(stem)
         if c is None:
             return [stem]
-        cid = core_id(c["core_token"])
-        if not cid:
-            return [stem]
         group = [s for s, sc in self.cores.items()
-                 if sc["tree"] == c["tree"] and core_id(sc["core_token"]) == cid]
+                 if sc["core_key"] == c["core_key"] and sc["tree"] == c["tree"]]
         if len(group) <= 1:
             return [stem]
         return sorted(group, key=lambda s: section_number(self.cores[s]["core_token"]))
+
+    def core_groups(self, stems):
+        """The given stems grouped into physical cores (sections together),
+        one entry per core, in the order the stems sort."""
+        groups, seen = [], {}
+        for stem in sorted(stems):
+            key = self.cores[stem]["core_key"]
+            if key in seen:
+                seen[key].append(stem)
+            else:
+                seen[key] = [stem]
+                groups.append(seen[key])
+        return [sorted(g, key=lambda s: section_number(self.cores[s]["core_token"]))
+                for g in groups]
+
+    def tree_source(self, stems):
+        """"auto", "manual" or "per-sample" for a tree: what decided it."""
+        kinds = set(self.cores[s]["tree_source"] for s in stems if s in self.cores)
+        if not kinds:
+            return "auto"
+        if "per-sample" in kinds:
+            return "per-sample"
+        return "manual" if "manual" in kinds else "auto"
+
+    def set_grouping(self, mode=None, assign=None, split=None, detach=None,
+                     reset=False):
+        """Change how this folder's cores are grouped into trees, persist it,
+        and move already-saved results to follow their measured core.
+
+        mode:   "auto" or "per-sample" (see load_grouping)
+        assign: {stem: tree id} -- move that stem's whole core to that tree;
+                an empty id puts the core back under the automatic grouping
+        split:  a tree id whose cores each become a tree of their own
+        detach: [stem, ...] -- each of those cores becomes a tree of its own
+        reset:  forget every override and go back to the automatic grouping
+
+        Raises KeyError for a tree that does not exist. Returns a report:
+        {"mode", "n_assigned", "moved", "revived", "retired", "warning"}.
+        """
+        g = {"mode": self.grouping.get("mode", "auto"),
+             "assign": dict(self.grouping.get("assign") or {})}
+        if reset:
+            g = {"mode": "auto", "assign": {}}
+        if mode is not None:
+            if mode not in GROUPING_MODES:
+                raise ValueError("mode must be one of: %s" % ", ".join(GROUPING_MODES))
+            g["mode"] = mode
+        if assign is not None and not isinstance(assign, dict):
+            raise ValueError("assign must be an object of {core file stem: tree id}")
+        if split is not None and not isinstance(split, str):
+            raise ValueError("split must be a tree id")
+        if detach is not None and not isinstance(detach, (list, tuple)):
+            raise ValueError("detach must be a list of core file stems")
+
+        if split:
+            entry = next((t for t in self.trees if t["tree"] == split), None)
+            if entry is None:
+                raise KeyError(split)
+            taken = set(t["tree"] for t in self.trees if t["tree"] != split)
+            for stems in self.core_groups(entry["cores"]):
+                label = unique_tree_id(core_label(stems), taken)
+                taken.add(label)
+                for stem in stems:
+                    g["assign"][stem] = label
+
+        # A core moving out on its own is named after itself, and the name has
+        # to be free: naming it after a tree that already exists would merge
+        # the two instead of separating them.
+        for stem in (detach or []):
+            if stem not in self.cores:
+                continue
+            stems = self.section_group(stem)
+            taken = set(t["tree"] for t in self.trees) - set([self.cores[stem]["tree"]])
+            label = unique_tree_id(core_label(stems), taken)
+            for s in stems:
+                g["assign"][s] = label
+
+        for stem, tree in (assign or {}).items():
+            if stem not in self.cores:
+                continue
+            tree = clean_tree_id(tree)
+            for s in self.section_group(stem):
+                if tree:
+                    g["assign"][s] = tree
+                else:
+                    g["assign"].pop(s, None)
+
+        # An entry that agrees with the automatic grouping is noise: dropping
+        # it keeps "nothing overridden" and "overridden back to the same
+        # answer" from being two different states of the same folder.
+        for stem in list(g["assign"]):
+            c = self.cores.get(stem)
+            if c is None or g["assign"][stem] == c["auto_tree"]:
+                g["assign"].pop(stem, None)
+
+        # A file this build could not use is set aside, not overwritten.
+        stale = bool(self.grouping.get("warning"))
+        self.grouping = g
+        warning = save_grouping(self.folder, g, keep_existing=stale)
+        self.rescan()
+        report = self.store.regroup(
+            {stem: c["tree"] for stem, c in self.cores.items()},
+            {t["tree"]: t["selected"] for t in self.trees},
+            {t["tree"]: t["cores"] for t in self.trees},
+            {stem: c["tree_source"] for stem, c in self.cores.items()})
+        report["mode"] = g["mode"]
+        report["n_assigned"] = len(g["assign"])
+        report["warning"] = warning or report.get("error") or ""
+        return report
 
     def session(self):
         trees = []
@@ -1245,6 +1625,7 @@ class App(object):
             trees.append({
                 "tree": t["tree"],
                 "cores": t["cores"],
+                "source": self.tree_source(t["cores"]),
                 "selected": sel,
                 "has_image": bool(sel and self.cores[sel]["has_image"]),
                 "n_rings": self.cores[sel]["n_boundaries"] if sel else 0,
@@ -1261,6 +1642,12 @@ class App(object):
             "species": self.species,
             "start_index": first,
             "n_done": sum(1 for t in trees if t["done"]),
+            "grouping": {
+                "mode": self.grouping.get("mode", "auto"),
+                "n_assigned": len(self.grouping.get("assign") or {}),
+                "warning": self.grouping.get("warning") or "",
+                "n_retired": len(self.store.retired),
+            },
             "tool_version": TOOL_VERSION,
         }
 
@@ -1336,6 +1723,17 @@ class App(object):
             "image_expected": image_expected,
             "supports_window": c["image_kind"] == "ct_tv",
             "stretch_pct": [AUTO_PCT_LO, AUTO_PCT_HI],
+            "tree_source": self.tree_source(entry["cores"]),
+            "auto_tree": c["auto_tree"],
+            # One entry per physical core of this tree, sections together --
+            # what the grouping editor offers to move.
+            "core_groups": [{
+                "label": core_label(stems),
+                "stems": stems,
+                "auto_tree": self.cores[stems[0]]["auto_tree"],
+                "source": self.cores[stems[0]]["tree_source"],
+                "opened": stem in stems,
+            } for stems in self.core_groups(entry["cores"])],
             "siblings": siblings,
             "saved": self.store.rows.get(tree_id),
         }
@@ -1518,6 +1916,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._switch_folder(payload.get("path"))
             if u.path == "/api/folder/pick":
                 return self._pick_folder()
+            if u.path == "/api/grouping":
+                return self._set_grouping(payload)
             if u.path == "/api/resolution":
                 return self._set_resolution(payload)
             if u.path == "/api/species":
@@ -1620,6 +2020,34 @@ class Handler(BaseHTTPRequestHandler):
                                 if info.get("scale") == "auto" else ""),
         })
 
+    def _set_grouping(self, payload):
+        """POST /api/grouping -- how this folder's cores are grouped into
+        trees. The naming conventions are guesses about someone else's file
+        names; this is how the operator corrects them. Takes any of:
+
+            {"mode": "per-sample"}          every file its own item
+            {"mode": "auto"}                back to the naming conventions
+            {"split": "<tree>"}             that tree's cores become trees
+            {"detach": ["<stem>"]}          one core becomes its own tree
+            {"assign": {"<stem>": "<tree>"}}  move a core to another tree
+            {"reset": true}                 forget every override
+
+        Saved results follow their measured core (see ResultStore.regroup), so
+        nothing has to be measured again.
+        """
+        try:
+            report = self.app.set_grouping(
+                mode=payload.get("mode"),
+                assign=payload.get("assign"),
+                split=payload.get("split"),
+                detach=payload.get("detach"),
+                reset=bool(payload.get("reset")))
+        except KeyError as exc:
+            return self._err(404, "no tree %s in this folder" % exc)
+        except ValueError as exc:
+            return self._err(400, str(exc))
+        return self._json({"ok": True, "report": report})
+
     def _set_resolution(self, payload):
         """POST /api/resolution -- an operator-entered pixel size (microns
         per pixel) for a core. Persisted by writing <stem>_resolution.txt,
@@ -1697,6 +2125,7 @@ class Handler(BaseHTTPRequestHandler):
 
         row = {
             "tree": tree,
+            "tree_source": d.get("tree_source") or "auto",
             "core": d["stem"],
             "other_cores": ", ".join(s for s in
                                      next(t["cores"] for t in self.app.trees

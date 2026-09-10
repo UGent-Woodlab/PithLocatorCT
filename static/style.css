@@ -413,3 +413,22 @@ input[type=checkbox] { accent-color: var(--accent); }
   .readout-value { font-size: 20px; }
   .hud-topright { display: none; }
 }
+
+/* ---------------------------------------------------------------- grouping */
+
+.group-modes { display: grid; gap: 6px; margin: 0 0 14px;
+               padding: 10px 12px; background: var(--bg-3);
+               border: 1px solid var(--line); border-radius: 8px; }
+.group-modes .checkline { margin: 0; align-items: flex-start; }
+.group-modes .checkline input { margin-top: 3px; flex: 0 0 auto; }
+.group-sub { font-size: 11px; text-transform: uppercase; letter-spacing: .7px;
+             color: var(--text-3); font-weight: 500; margin: 0 0 6px; }
+.group-sub .mono { font-family: var(--mono); text-transform: none;
+                   letter-spacing: 0; color: var(--text); font-size: 12.5px; }
+.group-table-core { font-family: var(--mono); font-size: 12.5px; }
+.group-table-core small { display: block; color: var(--text-3); font-size: 11px; }
+.species-table select {
+  background: var(--bg); border: 1px solid var(--line-2); border-radius: 6px;
+  padding: 4px 7px; width: 100%; color: inherit; font: inherit;
+}
+#treeSource { cursor: default; }

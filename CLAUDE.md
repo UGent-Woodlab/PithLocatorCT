@@ -77,7 +77,12 @@ These are the things that look wrong and are not, or that break silently.
    species is visible in the dropdown and saves re-picking it for a whole folder.
    Do not "fix" this asymmetry — see `applySaved`.
 
-7. **The no-separator naming convention only applies when the folder confirms
+7. **Everything in 7 and 8 is the DEFAULT grouping, not the grouping.** The
+   naming rules below decide `auto_tree`; `c["tree"]` is what the rest of the
+   tool reads, and `apply_grouping` may have overridden it (see 13). Never
+   reason about trees from a stem name alone.
+
+   **The no-separator naming convention only applies when the folder confirms
    it.** `parse_stem_structural` reads `ABC123A` as tree `ABC123`, core `A`, but
    `resolve_stem_names` only accepts that split when some *other* stem's
    structural split lands on the same tree -- once confirmed anywhere in the
@@ -169,6 +174,40 @@ These are the things that look wrong and are not, or that break silently.
    pixels; only the µm/px multiplier that turns them into millimetres can be
    wrong.
 
+13. **The operator's grouping overrides the naming rules, and results follow
+   their core.** `pith_grouping.json` in a data folder holds `mode`
+   (`"auto"` or `"per-sample"`) and `assign` (`{stem: tree id}`), versioned
+   like the species table -- a newer file is left alone rather than half-read,
+   because a grouping silently different from what the operator set is worse
+   than none, and it is moved to `pith_grouping.old.json` (never overwritten)
+   the first time the operator changes something. `scan_folder` resolves the automatic answer into `auto_tree`
+   first and `apply_grouping` then overlays the override, so every core always
+   carries `auto_tree` (the override is undoable), `tree` (what everything
+   reads) and `tree_source` (`auto`/`manual`/`per-sample`, and a column in the
+   sheet).
+
+   `core_key` is the identity of the PHYSICAL core -- built from the
+   **automatic** tree plus core id, and what `section_group` keys off instead
+   of `(tree, core_id)`. That indirection is the point: an operator moves
+   cores between trees, and two cores that happen to share a core letter must
+   not start looking like sections of each other because they landed in the
+   same tree. An `assign` entry names one stem but moves that stem's whole
+   section group -- sections are pieces of one sample and cannot sit in two
+   trees (see 8). Per-sample mode gives every file its own `tree` AND its own
+   `core_key`, which is what "ignore the tree logic" has to mean: case 3 then
+   uses one file's ΣRW, deliberately not the section sum of 8.
+
+   Results are keyed by tree, so a regrouping has to move them:
+   `ResultStore.regroup` re-keys every row by the tree its measured core now
+   belongs to. When two measured cores end up in one tree the sheet would have
+   a row too many, so the row for the tree's selected core stands and the
+   others are **retired** -- kept in `pith_offsets.json`, left out of the
+   `.xlsx`, and reconsidered on every regrouping, so undoing a merge revives
+   the measurement rather than asking for it again. Retired rows are why
+   `regroup` pools `rows` and `retired` together before choosing; do not
+   "simplify" it to a pass over `rows`. Deleting a measurement because the
+   operator regrouped is never the answer.
+
 ## The launchers
 
 `run.bat` and `run.sh` both do three things **in this order**, and the order is
@@ -250,6 +289,18 @@ Worth re-checking after any change to grouping or selection:
 | `KOR-014-A` + `KOR-014-B` | tree `KOR-014` -- same shape, but nothing confirms a tree `KOR` |
 | `TREE1-A` with a colour `.tif`, `TREE1-B` with no image at all | `TREE1-A` opens even though it is younger -- `has_image` outranks year, and a colour core counts |
 | a real multi-page TIFF saved as `<stem>.tif`, no `_Tv.tif` | `has_image` false, `image_reject` names the page count, `/api/image` 404s |
+
+Grouping overrides are testable entirely headless through `POST /api/grouping`
+(`mode`, `assign`, `split`, `detach`, `reset`) plus `GET /api/session`, and that
+is the quickest way to check the result-following logic: save a result, split its
+tree, and assert the row moved to the new tree id; merge two measured cores and
+assert one row is retired in `pith_offsets.json` and absent from the `.xlsx`;
+undo the merge and assert it is revived. In the UI the editor is `#groupModal`
+(opened by `#btnGroup`), whose `#groupTable` has one row per physical core --
+sections listed together in one row, since a core moves with its sections -- and
+`#modePerSample` is the folder-wide switch. Closing the modal between actions
+matters when driving it: it stays open on purpose so several corrections can be
+made in a row, and it covers the sidebar while it is up.
 
 The folder switch is testable headless apart from the dialog itself: drive
 `POST /api/folder` (and `openFolder(path)` in the page) between two folders and

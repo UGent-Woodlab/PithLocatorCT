@@ -49,6 +49,9 @@
     <div class="corebar">
       <div class="corebar-left">
         <span id="treeName" class="tree-name">—</span>
+        <span id="treeSource" class="pill hidden"></span>
+        <button id="btnGroup" class="ghost-btn small"
+                title="Correct how these cores are grouped into trees">Grouping…</button>
         <span id="coreChips" class="core-chips"></span>
       </div>
       <div class="corebar-right">
@@ -257,7 +260,31 @@
         two sections of core 1 of <code>GHE-F015</code>, beside its core
         <code>GHE-F015-<b>2</b></code> — accepted only when such a numbered core
         is in the folder to confirm it, so <code>KOR-014-A</code> is never carved
-        up. For each tree the core that reaches
+        up.
+      </p>
+      <p>
+        Those rules are guesses about someone else's file names, so they can be
+        <b>overridden</b>: <b>Grouping…</b>, beside the tree name, opens an editor
+        for the tree that is open. Per core it can go to another tree, to a tree of
+        its own, to a new tree you name, or back to what the file names say;
+        <b>Not one tree — split them all</b> gives every core of the tree its own,
+        for a site code that ends in a letter and was never a tree at all. The same
+        editor holds a folder-wide switch, <b>Measure every sample on its own</b>,
+        which turns the tree logic off altogether: every
+        <code>_ring_and_fibre.txt</code> file becomes its own item with its own row
+        in the spreadsheet — sections of a broken core included, so case 3 then uses
+        that one file's ΣRW instead of the sum. Corrections are remembered per
+        folder in <code>pith_grouping.json</code>, the <code>TreeID_Source</code>
+        column records whether a row's tree came from the file names
+        (<code>auto</code>), from you (<code>manual</code>) or from per-sample mode,
+        and <b>results already saved follow their core</b> wherever you move it. If
+        a change puts two measured cores in one tree, the sheet keeps one row per
+        tree: the result for the core the tree now opens stands and the other is set
+        aside in <code>pith_offsets.json</code> — not deleted, and brought straight
+        back if you undo the change.
+      </p>
+      <p>
+        For each tree the core that reaches
         <b>furthest back in time</b> (lowest indicated year) is opened; on an
         equal oldest year the higher section number wins. Every core of the tree
         is listed beside the tree name, so one click switches to another. It
@@ -413,6 +440,55 @@
         <button id="btnAddSpecies" class="ghost-btn">Add species</button>
         <button id="btnSaveSpecies" class="primary-btn">Save table</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- grouping -->
+<div id="groupModal" class="modal hidden">
+  <div class="modal-card wide">
+    <header>
+      <h2>Grouping — which cores belong to which tree</h2>
+      <button class="icon-btn close" data-close="groupModal">✕</button>
+    </header>
+    <div class="modal-body">
+      <p class="hint">
+        The tree a core belongs to is read off its file name, and that is a guess
+        about someone else's naming: a site code that ends in a letter, a folder
+        that mixes two habits, or a sample filed under the wrong tree all come out
+        wrong. Correct it here. What you set is remembered in
+        <code>pith_grouping.json</code> beside your data, and <b>results already
+        saved follow their core</b> — nothing has to be measured again.
+      </p>
+
+      <div class="group-modes">
+        <label class="checkline">
+          <input type="radio" name="groupMode" id="modeAuto" value="auto">
+          <span><b>Group cores into trees</b> from their file names, corrected by
+            what you set below — one saved distance per tree.</span>
+        </label>
+        <label class="checkline">
+          <input type="radio" name="groupMode" id="modePerSample" value="per-sample">
+          <span><b>Measure every sample on its own</b> — no tree logic at all. Each
+            <code>_ring_and_fibre.txt</code> file becomes its own item with its own
+            row in the spreadsheet, sections of a broken core included, so
+            case&nbsp;3 uses that one file's ΣRW rather than the sum.</span>
+        </label>
+      </div>
+
+      <div id="groupTreeBox">
+        <h3 class="group-sub">Cores of <span id="groupTreeName" class="mono"></span></h3>
+        <table id="groupTable" class="species-table"></table>
+        <div class="modal-actions">
+          <button id="btnSplitTree" class="ghost-btn"
+                  title="These cores are not one tree: give each of them its own">
+            Not one tree — split them all
+          </button>
+          <button id="btnResetGrouping" class="ghost-btn"
+                  title="Forget every correction in this folder">Undo all corrections</button>
+        </div>
+      </div>
+      <p id="groupState" class="hint"></p>
     </div>
   </div>
 </div>
